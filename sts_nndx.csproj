@@ -1,0 +1,42 @@
+<Project Sdk="Godot.NET.Sdk/4.5.1">
+  <PropertyGroup>
+    <!-- 如果你安装了10.0并遇到问题，改下这里 -->
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>true</ImplicitUsings>
+    <LangVersion>13.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- 改成你的杀戮尖塔2目录 -->
+    <Sts2Dir>/Users/schurfroggy/Library/Application Support/Steam/steamapps/common/Slay the Spire 2</Sts2Dir>
+    <Sts2DataDir>$(Sts2Dir)/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64</Sts2DataDir>
+    <Sts2ModsDir>$(Sts2Dir)/SlayTheSpire2.app/Contents/MacOS/mods</Sts2ModsDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="sts2">
+      <HintPath>$(Sts2DataDir)/sts2.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <Reference Include="0Harmony">
+      <HintPath>$(Sts2DataDir)/0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <PackageReference Include="STS2.RitsuLib" Version="*" />
+  </ItemGroup>
+
+  <!-- 自动复制 dll、json 和 pck -->
+  <Target Name="Copy Mod" AfterTargets="PostBuildEvent">
+    <Message Text="Copying mod to Slay the Spire 2 mods folder..." Importance="high" />
+    <MakeDir Directories="$(Sts2ModsDir)/$(MSBuildProjectName)/" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(Sts2ModsDir)/$(MSBuildProjectName)/" />
+    <Copy SourceFiles="$(MSBuildProjectName).json" DestinationFolder="$(Sts2ModsDir)/$(MSBuildProjectName)/" />
+    <Copy SourceFiles="sts_nndx.pck"
+          DestinationFolder="$(Sts2ModsDir)/$(MSBuildProjectName)/"
+          Condition="Exists('sts_nndx.pck')" />
+    <Warning Text="sts_nndx.pck not found. Export it with: godot --headless --path . --export-pack &quot;macOS&quot; sts_nndx.pck"
+             Condition="!Exists('sts_nndx.pck')" />
+  </Target>
+</Project>

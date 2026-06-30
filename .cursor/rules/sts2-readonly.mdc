@@ -1,0 +1,22 @@
+---
+description: STS2 源码只读，禁止 Agent 修改
+alwaysApply: true
+---
+
+# STS2 源码只读
+
+工作区中的 `SlayTheSpire2` 目录（路径 `../SlayTheSpire2`）是杀戮尖塔 2 的参考源码，仅供阅读。
+
+## 允许
+
+- 读取、搜索、引用该目录下的代码
+- 基于源码理解 API、类名、方法签名，并在 mod 中调用
+
+## 禁止
+
+- 在 `SlayTheSpire2/` 下创建、修改、删除任何文件
+- 将 mod 相关代码写入 STS2 源码目录
+
+## 代码改动范围
+
+所有实现与修改只能在 `sts_nndx` 项目内进行。

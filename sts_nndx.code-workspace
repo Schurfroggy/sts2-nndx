@@ -1,0 +1,17 @@
+{
+    "folders": [
+      {
+        "name": "sts_nndx (mod)",
+        "path": "."
+      },
+      {
+        "name": "STS2 Source (只读)",
+        "path": "../SlayTheSpire2"
+      }
+    ],
+    "settings": {
+        "files.readonlyInclude": {
+        "../SlayTheSpire2/**": true
+        }
+    }
+  }

@@ -2,3 +2,6 @@
 .godot/
 /android/
 .tmp_inspect/
+
+# Local planning notes (not for release)
+docs/

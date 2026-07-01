@@ -6,6 +6,10 @@ using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
+using MegaCrit.Sts2.Core.Nodes.Screens.Capstones;
+using MegaCrit.Sts2.Core.Nodes.Screens.Map;
+using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
+using MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext;
 
 namespace Nndx.Scripts;
 
@@ -17,7 +21,7 @@ internal static class NndxVideoOverlay
     private const string AnimationName = "default";
     private const float FrameRate = 24f;
     private const float LayoutScaleMultiplier = 1.5f;
-    private const int OverlaySpriteZIndex = -10;
+    private const int MaxPlayerDrawOrderZIndex = 9;
     private const int SheetColumns = 19;
     private const int FrameCount = 474;
     private const int FrameWidth = 270;
@@ -31,6 +35,7 @@ internal static class NndxVideoOverlay
     private static AudioStream? _cachedAudio;
     private static AudioStream? _cachedDeadAudio;
     private static bool _preloadAttempted;
+    private static bool _screenContextHooked;
 
     private sealed class PlayerOverlaySession
     {
@@ -150,7 +155,7 @@ internal static class NndxVideoOverlay
             Animation = AnimationName,
             Centered = false,
             ZAsRelative = true,
-            ZIndex = OverlaySpriteZIndex,
+            ZIndex = 0,
         };
 
         creatureNode.Visuals.AddChild(animatedSprite);
@@ -162,7 +167,9 @@ internal static class NndxVideoOverlay
         session.Sprite = animatedSprite;
         session.Audio = StartAudio(creatureNode);
         _sessions[playerNetId] = session;
+        EnsureScreenContextHook();
         SyncPlayerCreatureDrawOrder();
+        SyncOverlaySpriteVisibility();
 
         if (broadcast)
         {
@@ -199,6 +206,8 @@ internal static class NndxVideoOverlay
         CleanupAudio(session);
         _sessions.Remove(playerNetId);
         SyncPlayerCreatureDrawOrder();
+        SyncOverlaySpriteVisibility();
+        ReleaseScreenContextHookIfIdle();
 
         if (broadcast)
         {
@@ -297,9 +306,9 @@ internal static class NndxVideoOverlay
     }
 
     /// <summary>
-    /// While any overlay is active, raise each player creature's ZIndex by screen depth so front-row
-    /// characters (larger GlobalPosition.Y, closer to the bottom) draw above back-row ones.
-    /// Matches NCombatRoom.PositionPlayersAndPets row layout.
+    /// While any overlay is active, assign each player a small relative ZIndex (1..9) by row depth so
+    /// front-row characters draw above back-row ones and enemies, without exceeding GlobalUi (z=0).
+    /// CombatSceneContainer is z=-10; player z=1 yields effective -9, above enemies at -10.
     /// </summary>
     private static void SyncPlayerCreatureDrawOrder()
     {
@@ -309,24 +318,103 @@ internal static class NndxVideoOverlay
             return;
         }
 
-        bool hasActiveOverlay = _sessions.Count > 0;
+        List<NCreature> players = room.CreatureNodes
+            .Where(creature => creature.Entity.IsPlayer)
+            .ToList();
 
-        foreach (NCreature creature in room.CreatureNodes)
+        if (_sessions.Count == 0)
         {
-            if (!creature.Entity.IsPlayer)
+            foreach (NCreature creature in players)
+            {
+                creature.ZAsRelative = true;
+                creature.ZIndex = 0;
+            }
+
+            return;
+        }
+
+        List<NCreature> sortedByDepth = players
+            .OrderBy(creature => creature.GlobalPosition.Y)
+            .ToList();
+
+        for (int i = 0; i < sortedByDepth.Count; i++)
+        {
+            NCreature creature = sortedByDepth[i];
+            creature.ZAsRelative = true;
+            creature.ZIndex = Math.Min(i + 1, MaxPlayerDrawOrderZIndex);
+        }
+    }
+
+    private static void EnsureScreenContextHook()
+    {
+        if (_screenContextHooked)
+        {
+            return;
+        }
+
+        ActiveScreenContext.Instance.Updated += OnActiveScreenContextUpdated;
+        _screenContextHooked = true;
+    }
+
+    private static void ReleaseScreenContextHookIfIdle()
+    {
+        if (!_screenContextHooked || _sessions.Count > 0)
+        {
+            return;
+        }
+
+        ActiveScreenContext.Instance.Updated -= OnActiveScreenContextUpdated;
+        _screenContextHooked = false;
+    }
+
+    private static void OnActiveScreenContextUpdated()
+    {
+        SyncOverlaySpriteVisibility();
+    }
+
+    private static bool ShouldShowOverlaySprites()
+    {
+        if (!CombatManager.Instance.IsInProgress || NCombatRoom.Instance == null)
+        {
+            return false;
+        }
+
+        if (NMapScreen.Instance?.IsOpen == true)
+        {
+            return false;
+        }
+
+        if (NCapstoneContainer.Instance?.InUse == true)
+        {
+            return false;
+        }
+
+        if (NOverlayStack.Instance is { ScreenCount: > 0 })
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static void SyncOverlaySpriteVisibility()
+    {
+        if (_sessions.Count == 0)
+        {
+            return;
+        }
+
+        bool visible = ShouldShowOverlaySprites();
+
+        foreach (PlayerOverlaySession session in _sessions.Values)
+        {
+            if (session.Sprite == null || !GodotObject.IsInstanceValid(session.Sprite))
             {
                 continue;
             }
 
-            creature.ZAsRelative = true;
-            creature.ZIndex = hasActiveOverlay ? GetPlayerDepthZIndex(creature) : 0;
+            session.Sprite.Visible = visible;
         }
-    }
-
-    private static int GetPlayerDepthZIndex(NCreature creature)
-    {
-        // Higher Y = closer to screen bottom = front row = should draw on top.
-        return (int)Math.Round(creature.GlobalPosition.Y);
     }
 
     private static void ApplyLayout(NCreature creatureNode, AnimatedSprite2D sprite)
@@ -349,7 +437,7 @@ internal static class NndxVideoOverlay
 
         sprite.Position = creatureNode.Visuals.ToLocal(spriteTopLeft);
         sprite.ZAsRelative = true;
-        sprite.ZIndex = OverlaySpriteZIndex;
+        sprite.ZIndex = 0;
     }
 
     private static void OnAnimationFinished(ulong playerNetId)

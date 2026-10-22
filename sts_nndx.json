@@ -2,13 +2,13 @@
 	"id": "sts_nndx",          
 	"name": "sts_nndx",
 	"author": "froggy",
-	"description": "按C开始大笑",
+	"description": "",
 	"version": "0.1.0",
 	"min_game_version": "0.107.1", 
 	"has_pck": true,         
 	"has_dll": true,        
 	"dependencies": [
-	  { "id": "STS2-RitsuLib", "min_version": "0.2.27" }
+	  { "id": "STS2-RitsuLib", "min_version": "0.4.45" }
 	],    
 	"affects_gameplay": false
   }

@@ -6,6 +6,11 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../Scripts/NndxPortraitSwap.cs" Link="Production/NndxPortraitSwap.cs" />
+    <Compile Include="../Scripts/Input/NndxBindingCapture.cs" Link="Production/NndxBindingCapture.cs" />
+    <Compile Include="../Scripts/Input/NndxInput.cs" Link="Production/NndxInput.cs" />
+    <Compile Include="../Scripts/Input/NndxBindingRules.cs" Link="Production/NndxBindingRules.cs" />
+    <Compile Include="../Scripts/Input/NndxInputPreferences.cs" Link="Production/NndxInputPreferences.cs" />
     <Compile Include="../Scripts/NndxVideoOverlay.cs" Link="Production/NndxVideoOverlay.cs" />
     <Compile Include="../Scripts/NndxOverlaySync.cs" Link="Production/NndxOverlaySync.cs" />
     <Compile Include="../Scripts/NndxOverlaySyncMessage.cs" Link="Production/NndxOverlaySyncMessage.cs" />

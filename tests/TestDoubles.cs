@@ -12,6 +12,7 @@ namespace Godot
     public readonly record struct StringName(string Value)
     {
         public static implicit operator StringName(string value) => new(value);
+        public override string ToString() => Value;
     }
 
     public readonly record struct Vector2(float X, float Y)
@@ -30,7 +31,7 @@ namespace Godot
         public Rect2(float x, float y, float width, float height) : this(new(x, y), new(width, height)) { }
     }
 
-    public class Node : GodotObject
+    public partial class Node : GodotObject
     {
         public static readonly List<Node> All = new();
         public static bool FailNextAudioAdd;
@@ -43,6 +44,8 @@ namespace Godot
         public enum ProcessModeEnum { Inherit, Pausable, WhenPaused, Always, Disabled }
         public ProcessModeEnum ProcessMode { get; set; }
         public Node() => All.Add(this);
+        public IEnumerable<Node> GetChildren() => Children;
+        public T? GetNodeOrNull<T>(string path) where T : Node => Children.OfType<T>().FirstOrDefault();
         public virtual void AddChild(Node child)
         {
             if (child is AudioStreamPlayer && FailNextAudioAdd)
@@ -114,13 +117,17 @@ namespace Godot
         }
     }
 
-    public class Control : Node2D
+    public partial class Control : Node2D
     {
         public Vector2 Size { get; set; } = new(270, 330);
         public Rect2 GetGlobalRect() => new(GlobalPosition, Size * GlobalScale);
     }
 
     public class Texture2D : GodotObject { }
+    public class TextureRect : Control
+    {
+        public Texture2D? Texture { get; set; }
+    }
     public class AtlasTexture : Texture2D
     {
         public Texture2D? Atlas { get; set; }
@@ -136,7 +143,15 @@ namespace Godot
     }
     public static class ResourceLoader
     {
-        public static T? Load<T>(string path) where T : GodotObject, new() => new();
+        public static readonly Dictionary<string, int> Loads = new();
+        public static readonly Dictionary<string, GodotObject> Resources = new();
+        public static T? Load<T>(string path) where T : GodotObject, new()
+        {
+            Loads[path] = Loads.GetValueOrDefault(path) + 1;
+            var resource = new T();
+            Resources[path] = resource;
+            return resource;
+        }
     }
 
     public class AnimatedSprite2D : Node2D
@@ -193,7 +208,7 @@ namespace Godot
         public void Expire() { TimeLeft = 0; Timeout?.Invoke(); }
         public Action CaptureTimeout() => Timeout ?? (() => { });
     }
-    public class SceneTree : GodotObject
+    public partial class SceneTree : GodotObject
     {
         public List<SceneTreeTimer> Timers { get; } = new();
         public SceneTreeTimer CreateTimer(double duration, bool processAlways = true, bool processInPhysics = false, bool ignoreTimeScale = false)
@@ -208,6 +223,7 @@ namespace Godot
         private static readonly Queue<Action> Pending = new();
         public static Callable From(Action action) => new(action);
         public void CallDeferred() => Pending.Enqueue(action);
+        public void Call() => action();
         public static void Flush()
         {
             while (Pending.TryDequeue(out Action? action)) action();
@@ -244,6 +260,7 @@ namespace MegaCrit.Sts2.Core.Combat
 {
     public class CombatState
     {
+        public MegaCrit.Sts2.Core.Runs.PortraitTestRunState RunState { get; } = new();
         public List<MegaCrit.Sts2.Core.Entities.Players.Player> Players { get; } = new();
         public MegaCrit.Sts2.Core.Entities.Players.Player? GetPlayer(ulong id) => Players.SingleOrDefault(player => player.NetId == id);
     }
@@ -342,6 +359,14 @@ namespace MegaCrit.Sts2.Core.Multiplayer.Game
 }
 namespace MegaCrit.Sts2.Core.Runs
 {
+    public class PortraitTestRunState
+    {
+        public PortraitTestRoom CurrentRoom { get; } = new();
+        public PortraitTestRng Rng { get; } = new();
+    }
+    public class PortraitTestRoom { public int? Id { get; set; } = 42; }
+    public class PortraitTestRng { public uint Seed { get; set; } = 123; }
+
     public class RunManager
     {
         public static RunManager? Instance { get; set; } = new();

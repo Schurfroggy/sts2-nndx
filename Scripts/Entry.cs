@@ -1,8 +1,8 @@
+using HarmonyLib;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Modding;
 using STS2RitsuLib;
 using STS2RitsuLib.Interop;
-using STS2RitsuLib.RuntimeInput;
 
 namespace Nndx.Scripts;
 
@@ -17,18 +17,10 @@ public static class Entry
     {
         Logger = RitsuLibFramework.CreateLogger(ModId);
 
-        RuntimeHotkeyService.Register(
-            "C",
-            NndxVideoOverlay.Toggle,
-            new RuntimeHotkeyOptions
-            {
-                Id = $"{ModId}.toggle_video",
-                DisplayName = "Toggle NNDX Video",
-                Description = "In combat, hide your character and play the NNDX video at their position.",
-                Category = "sts_nndx",
-            });
+        NndxInput.Initialize();
 
         NndxOverlaySync.Initialize();
+        new Harmony(ModId + ".portraits").PatchAll(typeof(Entry).Assembly);
 
         RitsuLibFramework.SubscribeLifecycle<CombatStartingEvent>(_ => NndxVideoOverlay.Preload());
         RitsuLibFramework.SubscribeLifecycle<CombatEndedEvent>(_ =>

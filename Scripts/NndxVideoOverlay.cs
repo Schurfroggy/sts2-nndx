@@ -5,6 +5,7 @@ using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Nodes.Combat;
+using MegaCrit.Sts2.Core.Nodes.Multiplayer;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Nodes.Screens.Capstones;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
@@ -53,6 +54,10 @@ internal static class NndxVideoOverlay
 
         public bool IsLocallyControlled { get; init; }
 
+        public byte FaceIndex { get; init; }
+
+        public NndxPortraitSwap.Handle? Portrait { get; set; }
+
         public AnimatedSprite2D? Sprite { get; set; }
 
         public AudioStreamPlayer? Audio { get; set; }
@@ -72,6 +77,7 @@ internal static class NndxVideoOverlay
         }
 
         _preloadAttempted = true;
+        NndxPortraitSwap.Preload();
 
         try
         {
@@ -148,7 +154,7 @@ internal static class NndxVideoOverlay
         }
     }
 
-    public static void StartForPlayer(ulong playerNetId, bool broadcast, bool locallyControlled = false)
+    public static void StartForPlayer(ulong playerNetId, bool broadcast, bool locallyControlled = false, byte? faceIndex = null)
     {
         if (_sessions.ContainsKey(playerNetId))
         {
@@ -169,6 +175,7 @@ internal static class NndxVideoOverlay
             return;
         }
 
+        if (faceIndex is >= NndxPortraitSwap.FaceCount) return;
         Node2D body = creatureNode.Visuals.GetCurrentBody();
         PlayerOverlaySession session = new()
         {
@@ -177,6 +184,8 @@ internal static class NndxVideoOverlay
             Body = body,
             IsLocallyControlled = locallyControlled,
             BodyWasVisible = body.Visible,
+            // Cosmetic RNG is independent of the run's deterministic RNG streams.
+            FaceIndex = faceIndex ?? (byte)System.Random.Shared.Next(NndxPortraitSwap.FaceCount),
         };
 
         // Register ownership before hiding the body or allocating child nodes, so every
@@ -211,9 +220,10 @@ internal static class NndxVideoOverlay
             SyncPlayerCreatureDrawOrder();
             SyncOverlaySpriteVisibility();
 
+            TryCleanup(() => session.Portrait = NndxPortraitSwap.Apply(playerNetId, session.FaceIndex), "replace portrait");
             if (broadcast)
             {
-                NndxOverlaySync.Send(playerNetId, isPlaying: true);
+                NndxOverlaySync.Send(playerNetId, isPlaying: true, session.FaceIndex);
             }
         }
         catch (Exception ex)
@@ -221,6 +231,18 @@ internal static class NndxVideoOverlay
             Entry.Logger.Error($"NNDX overlay start failed for player {playerNetId}: {ex}");
             StopForPlayer(playerNetId, broadcast: false);
         }
+    }
+
+    internal static void OnPortraitPanelReady(NMultiplayerPlayerState panel)
+    {
+        if (!_sessions.TryGetValue(panel.Player.NetId, out var session)) return;
+        TryCleanup(() =>
+        {
+            if (session.Portrait is { } current && GodotObject.IsInstanceValid(current.Icon)
+                && ReferenceEquals(current.Icon, panel.GetNodeOrNull<TextureRect>("%CharacterIcon"))) return;
+            session.Portrait?.Restore();
+            session.Portrait = NndxPortraitSwap.Apply(panel, session.FaceIndex);
+        }, "refresh portrait");
     }
 
     public static void HandlePlayerDeath(Creature creature)
@@ -248,6 +270,7 @@ internal static class NndxVideoOverlay
             return;
         }
 
+        TryCleanup(() => session.Portrait?.Restore(), "restore portrait");
         TryCleanup(() => RestoreBody(session), "restore body");
         TryCleanup(() => CleanupAnimatedSprite(session), "remove sprite");
         TryCleanup(() => CleanupAudio(session), "remove audio");
@@ -434,7 +457,7 @@ internal static class NndxVideoOverlay
         TryCleanup(SyncOverlaySpriteVisibility, "update screen visibility");
     }
 
-    private static bool ShouldShowOverlaySprites()
+    internal static bool ShouldShowOverlaySprites()
     {
         if (!CombatManager.Instance.IsInProgress || NCombatRoom.Instance == null)
         {

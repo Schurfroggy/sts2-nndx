@@ -12,13 +12,17 @@ internal static class NndxOverlaySync
 {
     private static readonly RitsuLibSidecarMessageDescriptor<NndxOverlaySyncMessage> Descriptor = new(
         Entry.ModId,
-        "overlay",
+        "overlay_v2",
         NndxOverlaySyncMessage.Serialize,
         NndxOverlaySyncMessage.Deserialize,
         RitsuLibSidecarDeliverySemantics.StableSync,
         false);
 
     private static IDisposable? _subscription;
+    // A process restart/rejoin starts above earlier counters under a normally advancing clock.
+    private static ulong _nextSequence = (ulong)DateTime.UtcNow.Ticks;
+    private static readonly Dictionary<ulong, ulong> ReceivedSequences = new();
+    private static WeakReference<CombatState>? _sequenceScope;
 
     public static void Initialize()
     {
@@ -26,12 +30,12 @@ internal static class NndxOverlaySync
         _subscription = RitsuLibSidecarTypedMessageRegistry.Subscribe(Descriptor, OnMessageReceived);
     }
 
-    public static void Send(ulong playerNetId, bool isPlaying)
+    public static void Send(ulong playerNetId, bool isPlaying, byte faceIndex = NndxOverlaySyncMessage.NoFace)
     {
         // A transport failure must never interrupt local playback cleanup or game input.
         try
         {
-            SendCore(playerNetId, isPlaying);
+            SendCore(playerNetId, isPlaying, faceIndex);
         }
         catch (Exception ex)
         {
@@ -39,7 +43,7 @@ internal static class NndxOverlaySync
         }
     }
 
-    private static void SendCore(ulong playerNetId, bool isPlaying)
+    private static void SendCore(ulong playerNetId, bool isPlaying, byte faceIndex)
     {
         if (!IsNetworkedMultiplayer())
         {
@@ -52,10 +56,16 @@ internal static class NndxOverlaySync
             return;
         }
 
+        var state = CombatManager.Instance.DebugOnlyGetState();
+        if (state?.RunState.CurrentRoom?.Id is not int roomId) return;
         NndxOverlaySyncMessage message = new()
         {
             PlayerNetId = playerNetId,
             IsPlaying = isPlaying,
+            FaceIndex = isPlaying ? faceIndex : NndxOverlaySyncMessage.NoFace,
+            Sequence = ++_nextSequence,
+            RunSeed = state.RunState.Rng.Seed,
+            RoomId = roomId,
         };
 
         if (runManager.NetService.Type == NetGameType.Host)
@@ -107,6 +117,19 @@ internal static class NndxOverlaySync
             return;
         }
 
+        var state = CombatManager.Instance.DebugOnlyGetState();
+        if (!message.IsValid || state?.GetPlayer(message.PlayerNetId) == null
+            || state.RunState.CurrentRoom?.Id != message.RoomId || state.RunState.Rng.Seed != message.RunSeed)
+            return;
+        if (_sequenceScope == null || !_sequenceScope.TryGetTarget(out var previousState)
+            || !ReferenceEquals(previousState, state))
+        {
+            _sequenceScope = new WeakReference<CombatState>(state);
+            ReceivedSequences.Clear();
+        }
+        if (ReceivedSequences.TryGetValue(message.PlayerNetId, out ulong last) && message.Sequence <= last)
+            return;
+        ReceivedSequences[message.PlayerNetId] = message.Sequence;
         ApplyMessage(message);
 
         if (runManager?.NetService.Type != NetGameType.Host)
@@ -126,7 +149,9 @@ internal static class NndxOverlaySync
     {
         if (message.IsPlaying)
         {
-            NndxVideoOverlay.StartForPlayer(message.PlayerNetId, broadcast: false);
+            // A newer start can arrive even if a preceding stop was missed.
+            NndxVideoOverlay.StopForPlayer(message.PlayerNetId, broadcast: false);
+            NndxVideoOverlay.StartForPlayer(message.PlayerNetId, broadcast: false, faceIndex: message.FaceIndex);
             return;
         }
 

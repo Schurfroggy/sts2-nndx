@@ -77,7 +77,7 @@ def verify_package(directory, mode):
     for name in paths:
         if name.startswith(forbidden) or "NndxScaleConsoleCmd" in name:
             raise ValueError(f"Test/build-only resource found in PCK: {name}")
-    for resource in ("nndx_sheet.png-", "nndx.mp3-", "dead.mp3-"):
+    for resource in ("nndx_sheet.png-", "nndx.mp3-", "dead.mp3-", "face1.png-", "face2.png-", "face3.png-", "face4.png-"):
         if not any(name.startswith(".godot/imported/" + resource) for name in paths):
             raise ValueError(f"Missing imported resource: {resource}")
     return {**result, "pck_entries": len(paths), "test_resources": False}

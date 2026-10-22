@@ -26,6 +26,10 @@ internal static class NndxVideoOverlay
     private const int FrameCount = 474;
     private const int FrameWidth = 270;
     private const int FrameHeight = 330;
+    // Grounded poses in nndx_sheet.png end at y=315; the last 15 rows are transparent.
+    private const int FrameFootY = 315;
+    private const ulong ToggleCooldownMsec = 150;
+    private const double PlaybackTimeoutSeconds = FrameCount / (double)FrameRate + 2;
 
     private static readonly StringName SfxBus = new("SFX");
 
@@ -36,12 +40,16 @@ internal static class NndxVideoOverlay
     private static AudioStream? _cachedDeadAudio;
     private static bool _preloadAttempted;
     private static bool _screenContextHooked;
+    private static bool _toggleInProgress;
+    private static ulong? _lastToggleMsec;
 
     private sealed class PlayerOverlaySession
     {
         public required ulong PlayerNetId { get; init; }
 
         public required NCreature Creature { get; init; }
+
+        public required Node2D Body { get; init; }
 
         public bool IsLocallyControlled { get; init; }
 
@@ -50,6 +58,10 @@ internal static class NndxVideoOverlay
         public AudioStreamPlayer? Audio { get; set; }
 
         public bool BodyWasVisible { get; set; } = true;
+
+        public Action? PlaybackEnded { get; set; }
+
+        public SceneTreeTimer? Timeout { get; set; }
     }
 
     public static void Preload()
@@ -90,6 +102,12 @@ internal static class NndxVideoOverlay
 
     public static void Toggle()
     {
+        if (_toggleInProgress)
+        {
+            return;
+        }
+
+        _toggleInProgress = true;
         try
         {
             if (!TryGetLocalPlayerNetId(out ulong localNetId))
@@ -97,7 +115,16 @@ internal static class NndxVideoOverlay
                 return;
             }
 
-            if (_sessions.TryGetValue(localNetId, out PlayerOverlaySession? activeSession) && activeSession.IsLocallyControlled)
+            ulong now = Time.GetTicksMsec();
+            if (_lastToggleMsec is ulong last && now - last < ToggleCooldownMsec)
+            {
+                return;
+            }
+
+            _lastToggleMsec = now;
+
+            // The local key must also recover a stale session created by a network message.
+            if (_sessions.ContainsKey(localNetId))
             {
                 StopForPlayer(localNetId, broadcast: true);
                 return;
@@ -114,6 +141,10 @@ internal static class NndxVideoOverlay
         {
             Entry.Logger.Error($"NNDX overlay toggle crashed: {ex}");
             ForceStop();
+        }
+        finally
+        {
+            _toggleInProgress = false;
         }
     }
 
@@ -138,42 +169,57 @@ internal static class NndxVideoOverlay
             return;
         }
 
+        Node2D body = creatureNode.Visuals.GetCurrentBody();
         PlayerOverlaySession session = new()
         {
             PlayerNetId = playerNetId,
             Creature = creatureNode,
+            Body = body,
             IsLocallyControlled = locallyControlled,
+            BodyWasVisible = body.Visible,
         };
 
-        Node2D body = creatureNode.Visuals.GetCurrentBody();
-        session.BodyWasVisible = body.Visible;
-        body.Visible = false;
-
-        AnimatedSprite2D animatedSprite = new()
-        {
-            SpriteFrames = spriteFrames,
-            Animation = AnimationName,
-            Centered = false,
-            ZAsRelative = true,
-            ZIndex = 0,
-        };
-
-        creatureNode.Visuals.AddChild(animatedSprite);
-        creatureNode.Visuals.MoveChild(animatedSprite, 0);
-        ApplyLayout(creatureNode, animatedSprite);
-        animatedSprite.AnimationFinished += () => OnAnimationFinished(playerNetId);
-        animatedSprite.Play();
-
-        session.Sprite = animatedSprite;
-        session.Audio = StartAudio(creatureNode);
+        // Register ownership before hiding the body or allocating child nodes, so every
+        // partial startup can be rolled back through the same cleanup path.
         _sessions[playerNetId] = session;
-        EnsureScreenContextHook();
-        SyncPlayerCreatureDrawOrder();
-        SyncOverlaySpriteVisibility();
-
-        if (broadcast)
+        try
         {
-            NndxOverlaySync.Send(playerNetId, isPlaying: true);
+            body.Visible = false;
+
+            AnimatedSprite2D animatedSprite = new()
+            {
+                SpriteFrames = spriteFrames,
+                Animation = AnimationName,
+                Centered = false,
+                ZAsRelative = true,
+                ZIndex = 0,
+            };
+
+            session.Sprite = animatedSprite;
+            session.PlaybackEnded = () => OnPlaybackEnded(session);
+            animatedSprite.AnimationFinished += session.PlaybackEnded;
+            animatedSprite.TreeExiting += session.PlaybackEnded;
+            creatureNode.Visuals.AddChild(animatedSprite);
+            creatureNode.Visuals.MoveChild(animatedSprite, 0);
+            ApplyLayout(creatureNode, animatedSprite);
+            animatedSprite.Play();
+
+            StartAudio(session);
+            session.Timeout = creatureNode.GetTree().CreateTimer(PlaybackTimeoutSeconds, processAlways: false);
+            session.Timeout.Timeout += session.PlaybackEnded;
+            EnsureScreenContextHook();
+            SyncPlayerCreatureDrawOrder();
+            SyncOverlaySpriteVisibility();
+
+            if (broadcast)
+            {
+                NndxOverlaySync.Send(playerNetId, isPlaying: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Entry.Logger.Error($"NNDX overlay start failed for player {playerNetId}: {ex}");
+            StopForPlayer(playerNetId, broadcast: false);
         }
     }
 
@@ -196,18 +242,19 @@ internal static class NndxVideoOverlay
 
     public static void StopForPlayer(ulong playerNetId, bool broadcast)
     {
-        if (!_sessions.TryGetValue(playerNetId, out PlayerOverlaySession? session))
+        // Remove first: failed native cleanup must not leave a permanently occupied slot.
+        if (!_sessions.Remove(playerNetId, out PlayerOverlaySession? session))
         {
             return;
         }
 
-        RestoreBody(session);
-        CleanupAnimatedSprite(session);
-        CleanupAudio(session);
-        _sessions.Remove(playerNetId);
-        SyncPlayerCreatureDrawOrder();
-        SyncOverlaySpriteVisibility();
-        ReleaseScreenContextHookIfIdle();
+        TryCleanup(() => RestoreBody(session), "restore body");
+        TryCleanup(() => CleanupAnimatedSprite(session), "remove sprite");
+        TryCleanup(() => CleanupAudio(session), "remove audio");
+        TryCleanup(() => CleanupTimeout(session), "remove timeout");
+        TryCleanup(SyncPlayerCreatureDrawOrder, "restore draw order");
+        TryCleanup(SyncOverlaySpriteVisibility, "update visibility");
+        TryCleanup(ReleaseScreenContextHookIfIdle, "release screen hook");
 
         if (broadcast)
         {
@@ -220,6 +267,20 @@ internal static class NndxVideoOverlay
         foreach (ulong playerNetId in _sessions.Keys.ToArray())
         {
             StopForPlayer(playerNetId, broadcast: false);
+        }
+
+        _lastToggleMsec = null;
+    }
+
+    private static void TryCleanup(Action cleanup, string operation)
+    {
+        try
+        {
+            cleanup();
+        }
+        catch (Exception ex)
+        {
+            Entry.Logger.Error($"NNDX overlay cleanup failed ({operation}): {ex}");
         }
     }
 
@@ -264,7 +325,8 @@ internal static class NndxVideoOverlay
         CombatState? combatState = CombatManager.Instance.DebugOnlyGetState();
         Player? player = combatState?.GetPlayer(playerNetId);
         NCreature? creatureNode = player?.Creature.GetCreatureNode();
-        if (creatureNode == null || !GodotObject.IsInstanceValid(creatureNode))
+        if (player?.Creature.IsDead == true || creatureNode == null || !GodotObject.IsInstanceValid(creatureNode)
+            || creatureNode.IsQueuedForDeletion() || !creatureNode.IsInsideTree())
         {
             return null;
         }
@@ -369,7 +431,7 @@ internal static class NndxVideoOverlay
 
     private static void OnActiveScreenContextUpdated()
     {
-        SyncOverlaySpriteVisibility();
+        TryCleanup(SyncOverlaySpriteVisibility, "update screen visibility");
     }
 
     private static bool ShouldShowOverlaySprites()
@@ -420,47 +482,44 @@ internal static class NndxVideoOverlay
     private static void ApplyLayout(NCreature creatureNode, AnimatedSprite2D sprite)
     {
         Control bounds = creatureNode.Visuals.Bounds;
-        Rect2 boundsRect = bounds.GetGlobalRect();
-
-        float targetHeight = boundsRect.Size.Y;
+        // Both the bounds and sprite live under Visuals. Use the unscaled height;
+        // Visuals already applies the character's default and temporary body scales.
+        float targetHeight = bounds.Size.Y;
         if (targetHeight <= 0f)
         {
-            targetHeight = FrameHeight * creatureNode.Visuals.DefaultScale;
+            targetHeight = FrameHeight;
         }
 
         float scale = targetHeight / FrameHeight * LayoutScaleMultiplier;
         sprite.Scale = Vector2.One * scale;
-        float scaledHeight = FrameHeight * scale;
-        Vector2 spriteTopLeft = boundsRect.Position + new Vector2(
-            (boundsRect.Size.X - FrameWidth * scale) * 0.5f,
-            boundsRect.Size.Y - scaledHeight);
-
-        sprite.Position = creatureNode.Visuals.ToLocal(spriteTopLeft);
+        // The Visuals origin is the game's stable foot baseline next to the HP bar.
+        // Put the artwork's foot baseline there, excluding transparent bottom padding.
+        // Inherited scaling can change without moving the feet or a new layout pass.
+        sprite.Offset = new Vector2(-FrameWidth * 0.5f, -FrameFootY);
+        sprite.Position = Vector2.Zero;
         sprite.ZAsRelative = true;
         sprite.ZIndex = 0;
     }
 
-    private static void OnAnimationFinished(ulong playerNetId)
+    private static void OnPlaybackEnded(PlayerOverlaySession session)
     {
-        if (!_sessions.TryGetValue(playerNetId, out PlayerOverlaySession? session) || !session.IsLocallyControlled)
+        // An old sprite/timer must never stop a newer playback for the same player.
+        if (!_sessions.TryGetValue(session.PlayerNetId, out PlayerOverlaySession? current)
+            || !ReferenceEquals(current, session))
         {
             return;
         }
 
-        StopForPlayer(playerNetId, broadcast: true);
+        // Every peer restores its own visuals even when a remote stop never arrives.
+        StopForPlayer(session.PlayerNetId, broadcast: session.IsLocallyControlled);
     }
 
     private static void RestoreBody(PlayerOverlaySession session)
     {
-        if (!GodotObject.IsInstanceValid(session.Creature))
+        // GetCurrentBody() can change after Visible=false (e.g. phobia-mode visuals).
+        if (GodotObject.IsInstanceValid(session.Body))
         {
-            return;
-        }
-
-        Node2D body = session.Creature.Visuals.GetCurrentBody();
-        if (GodotObject.IsInstanceValid(body))
-        {
-            body.Visible = session.BodyWasVisible;
+            session.Body.Visible = session.BodyWasVisible;
         }
     }
 
@@ -473,11 +532,33 @@ internal static class NndxVideoOverlay
 
         if (GodotObject.IsInstanceValid(session.Sprite))
         {
-            session.Sprite.Stop();
-            session.Sprite.QueueFree();
+            AnimatedSprite2D sprite = session.Sprite;
+            if (session.PlaybackEnded != null)
+            {
+                TryCleanup(() => sprite.AnimationFinished -= session.PlaybackEnded, "disconnect animation");
+                TryCleanup(() => sprite.TreeExiting -= session.PlaybackEnded, "disconnect tree exit");
+            }
+
+            TryCleanup(sprite.Stop, "stop sprite");
+            if (!sprite.IsQueuedForDeletion())
+            {
+                sprite.QueueFree();
+            }
         }
 
         session.Sprite = null;
+    }
+
+    private static void CleanupTimeout(PlayerOverlaySession session)
+    {
+        if (session.Timeout != null && GodotObject.IsInstanceValid(session.Timeout)
+            && session.PlaybackEnded != null)
+        {
+            session.Timeout.Timeout -= session.PlaybackEnded;
+        }
+
+        session.Timeout = null;
+        session.PlaybackEnded = null;
     }
 
     private static AudioStream? GetAudio()
@@ -492,25 +573,25 @@ internal static class NndxVideoOverlay
         return _cachedAudio;
     }
 
-    private static AudioStreamPlayer? StartAudio(NCreature creatureNode)
+    private static void StartAudio(PlayerOverlaySession session)
     {
         AudioStream? audio = GetAudio();
         if (audio == null)
         {
             Entry.Logger.Error($"Failed to load audio at {AudioPath}.");
-            return null;
+            return;
         }
 
-        Node audioParent = NDebugAudioManager.Instance ?? NCombatRoom.Instance ?? (Node)creatureNode;
+        Node audioParent = NDebugAudioManager.Instance ?? NCombatRoom.Instance ?? (Node)session.Creature;
         AudioStreamPlayer audioPlayer = new()
         {
             Stream = audio,
             Bus = SfxBus,
             VolumeLinear = 1f,
         };
+        session.Audio = audioPlayer;
         audioParent.AddChild(audioPlayer);
         audioPlayer.Play();
-        return audioPlayer;
     }
 
     private static void CleanupAudio(PlayerOverlaySession session)
@@ -522,8 +603,12 @@ internal static class NndxVideoOverlay
 
         if (GodotObject.IsInstanceValid(session.Audio))
         {
-            session.Audio.Stop();
-            session.Audio.QueueFree();
+            AudioStreamPlayer audio = session.Audio;
+            TryCleanup(audio.Stop, "stop audio");
+            if (!audio.IsQueuedForDeletion())
+            {
+                audio.QueueFree();
+            }
         }
 
         session.Audio = null;

@@ -1,3 +1,4 @@
+using Godot;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Players;
@@ -14,7 +15,7 @@ internal static class NndxOverlaySync
         "overlay",
         NndxOverlaySyncMessage.Serialize,
         NndxOverlaySyncMessage.Deserialize,
-        RitsuLibSidecarDeliverySemantics.BestEffort,
+        RitsuLibSidecarDeliverySemantics.StableSync,
         false);
 
     private static IDisposable? _subscription;
@@ -26,6 +27,19 @@ internal static class NndxOverlaySync
     }
 
     public static void Send(ulong playerNetId, bool isPlaying)
+    {
+        // A transport failure must never interrupt local playback cleanup or game input.
+        try
+        {
+            SendCore(playerNetId, isPlaying);
+        }
+        catch (Exception ex)
+        {
+            Entry.Logger.Error($"NNDX overlay sync send failed: {ex}");
+        }
+    }
+
+    private static void SendCore(ulong playerNetId, bool isPlaying)
     {
         if (!IsNetworkedMultiplayer())
         {
@@ -55,26 +69,57 @@ internal static class NndxOverlaySync
 
     private static void OnMessageReceived(RitsuLibSidecarTypedDispatchContext<NndxOverlaySyncMessage> context)
     {
-        Player? localPlayer = LocalContext.GetMe(CombatManager.Instance.DebugOnlyGetState());
-        if (localPlayer != null && context.SenderNetId == localPlayer.NetId)
+        // Sidecar delivery (including StableSync) does not guarantee the Godot main thread.
+        NndxOverlaySyncMessage message = context.Message;
+        ulong senderNetId = context.SenderNetId;
+        Callable.From(() => ReceiveOnMainThread(message, senderNetId)).CallDeferred();
+    }
+
+    private static void ReceiveOnMainThread(NndxOverlaySyncMessage message, ulong senderNetId)
+    {
+        try
+        {
+            ReceiveCore(message, senderNetId);
+        }
+        catch (Exception ex)
+        {
+            Entry.Logger.Error($"NNDX overlay sync receive failed: {ex}");
+        }
+    }
+
+    private static void ReceiveCore(NndxOverlaySyncMessage message, ulong senderNetId)
+    {
+        if (!IsNetworkedMultiplayer() || !CombatManager.Instance.IsInProgress)
         {
             return;
         }
 
-        ApplyMessage(context.Message);
+        Player? localPlayer = LocalContext.GetMe(CombatManager.Instance.DebugOnlyGetState());
+        // A host relay has the host's sender ID, but may still describe our own player.
+        if (localPlayer == null || message.PlayerNetId == localPlayer.NetId)
+        {
+            return;
+        }
 
         RunManager? runManager = RunManager.Instance;
+        if (runManager?.NetService.Type == NetGameType.Host && senderNetId != message.PlayerNetId)
+        {
+            return;
+        }
+
+        ApplyMessage(message);
+
         if (runManager?.NetService.Type != NetGameType.Host)
         {
             return;
         }
 
-        if (context.SenderNetId == runManager.NetService.NetId)
+        if (senderNetId == runManager.NetService.NetId)
         {
             return;
         }
 
-        RitsuLibSidecarTypedMessageRegistry.Broadcast(runManager, Descriptor, context.Message);
+        RitsuLibSidecarTypedMessageRegistry.Broadcast(runManager, Descriptor, message);
     }
 
     private static void ApplyMessage(NndxOverlaySyncMessage message)

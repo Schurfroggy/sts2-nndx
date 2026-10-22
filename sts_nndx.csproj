@@ -6,14 +6,26 @@
     <LangVersion>13.0</LangVersion>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableNndxTestTools Condition="'$(EnableNndxTestTools)' == ''">false</EnableNndxTestTools>
 
     <!-- 改成你的杀戮尖塔2目录 -->
     <Sts2Dir>/Users/schurfroggy/Library/Application Support/Steam/steamapps/common/Slay the Spire 2</Sts2Dir>
     <Sts2DataDir>$(Sts2Dir)/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64</Sts2DataDir>
     <Sts2ModsDir>$(Sts2Dir)/SlayTheSpire2.app/Contents/MacOS/mods</Sts2ModsDir>
+    <MsilDllPath>$(MSBuildProjectDirectory)/.godot/mono/temp/bin/ExportRelease/$(MSBuildProjectName).dll</MsilDllPath>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(EnableNndxTestTools)' == 'true'">
+    <DefineConstants>$(DefineConstants);NNDX_TEST_TOOLS</DefineConstants>
+    <OutputPath>$(BaseOutputPath)TestTools/$(Configuration)/</OutputPath>
+    <IntermediateOutputPath>$(BaseIntermediateOutputPath)TestTools/$(Configuration)/</IntermediateOutputPath>
+    <MsilDllPath>$(OutputPath)$(MSBuildProjectName).dll</MsilDllPath>
+    <DeployMod Condition="'$(DeployMod)' == ''">false</DeployMod>
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+    <Compile Remove="Scripts/Testing/**/*.cs" Condition="'$(EnableNndxTestTools)' != 'true'" />
     <Reference Include="sts2">
       <HintPath>$(Sts2DataDir)/sts2.dll</HintPath>
       <Private>false</Private>
@@ -27,16 +39,18 @@
     <PackageReference Include="STS2.RitsuLib" Version="*" />
   </ItemGroup>
 
-  <!-- 自动复制 dll、json 和 pck -->
-  <Target Name="Copy Mod" AfterTargets="PostBuildEvent">
+  <!-- 自动复制 msil dll、json 和 pck -->
+  <Target Name="Copy Mod" AfterTargets="PostBuildEvent" Condition="'$(DeployMod)' != 'false'">
     <Message Text="Copying mod to Slay the Spire 2 mods folder..." Importance="high" />
     <MakeDir Directories="$(Sts2ModsDir)/$(MSBuildProjectName)/" />
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(Sts2ModsDir)/$(MSBuildProjectName)/" />
+    <Copy SourceFiles="$(MsilDllPath)" DestinationFolder="$(Sts2ModsDir)/$(MSBuildProjectName)/" />
     <Copy SourceFiles="$(MSBuildProjectName).json" DestinationFolder="$(Sts2ModsDir)/$(MSBuildProjectName)/" />
     <Copy SourceFiles="sts_nndx.pck"
           DestinationFolder="$(Sts2ModsDir)/$(MSBuildProjectName)/"
           Condition="Exists('sts_nndx.pck')" />
-    <Warning Text="sts_nndx.pck not found. Export it with: godot --headless --path . --export-pack &quot;macOS&quot; sts_nndx.pck"
+    <Warning Text="sts_nndx.pck not found. Export it with: godot --headless --path . --export-pack &quot;Windows Desktop&quot; sts_nndx.pck"
              Condition="!Exists('sts_nndx.pck')" />
+    <Warning Text="msil DLL not found at $(MsilDllPath). Export with Windows Desktop preset (architecture=msil); do not use osx-arm64/sts_nndx.dll"
+             Condition="!Exists('$(MsilDllPath)')" />
   </Target>
 </Project>

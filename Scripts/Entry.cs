@@ -31,7 +31,13 @@ public static class Entry
         NndxOverlaySync.Initialize();
 
         RitsuLibFramework.SubscribeLifecycle<CombatStartingEvent>(_ => NndxVideoOverlay.Preload());
-        RitsuLibFramework.SubscribeLifecycle<CombatEndedEvent>(_ => NndxVideoOverlay.ForceStop());
+        RitsuLibFramework.SubscribeLifecycle<CombatEndedEvent>(_ =>
+        {
+            NndxVideoOverlay.ForceStop();
+#if NNDX_TEST_TOOLS
+            NndxScaleConsoleCmd.RestoreOriginalSize();
+#endif
+        });
         RitsuLibFramework.SubscribeLifecycle<CreatureDiedEvent>(OnCreatureDied);
     }
 

@@ -4,6 +4,18 @@
 /artifacts/
 __pycache__/
 .tmp_inspect/
+.tmp_analysis/
+
+# Local build outputs and accidental deployment directories
+**/bin/
+**/obj/
+*.dll
+*.pdb
+*.pck
+/$(Sts2Dir)/
+
+# macOS Finder metadata
+.DS_Store
 
 # Local planning notes (not for release)
 docs/

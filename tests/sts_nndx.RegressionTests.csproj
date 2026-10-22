@@ -6,6 +6,8 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../Scripts/NndxRoomContext.cs" Link="Production/NndxRoomContext.cs" />
+    <Compile Include="../Scripts/NndxRoomLifecycle.cs" Link="Production/NndxRoomLifecycle.cs" />
     <Compile Include="../Scripts/NndxPortraitSwap.cs" Link="Production/NndxPortraitSwap.cs" />
     <Compile Include="../Scripts/Input/NndxBindingCapture.cs" Link="Production/NndxBindingCapture.cs" />
     <Compile Include="../Scripts/Input/NndxInput.cs" Link="Production/NndxInput.cs" />

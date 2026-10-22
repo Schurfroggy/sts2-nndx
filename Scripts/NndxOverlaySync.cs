@@ -1,5 +1,4 @@
 using Godot;
-using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
@@ -12,7 +11,7 @@ internal static class NndxOverlaySync
 {
     private static readonly RitsuLibSidecarMessageDescriptor<NndxOverlaySyncMessage> Descriptor = new(
         Entry.ModId,
-        "overlay_v2",
+        "overlay_v3",
         NndxOverlaySyncMessage.Serialize,
         NndxOverlaySyncMessage.Deserialize,
         RitsuLibSidecarDeliverySemantics.StableSync,
@@ -22,7 +21,7 @@ internal static class NndxOverlaySync
     // A process restart/rejoin starts above earlier counters under a normally advancing clock.
     private static ulong _nextSequence = (ulong)DateTime.UtcNow.Ticks;
     private static readonly Dictionary<ulong, ulong> ReceivedSequences = new();
-    private static WeakReference<CombatState>? _sequenceScope;
+    private static WeakReference<RunState>? _sequenceScope;
 
     public static void Initialize()
     {
@@ -56,16 +55,19 @@ internal static class NndxOverlaySync
             return;
         }
 
-        var state = CombatManager.Instance.DebugOnlyGetState();
-        if (state?.RunState.CurrentRoom?.Id is not int roomId) return;
+        var state = NndxRoomContext.State;
+        if (state?.CurrentRoom?.Id is not int roomId) return;
         NndxOverlaySyncMessage message = new()
         {
             PlayerNetId = playerNetId,
             IsPlaying = isPlaying,
             FaceIndex = isPlaying ? faceIndex : NndxOverlaySyncMessage.NoFace,
             Sequence = ++_nextSequence,
-            RunSeed = state.RunState.Rng.Seed,
+            RunSeed = state.Rng.Seed,
             RoomId = roomId,
+            ActIndex = state.CurrentActIndex,
+            MapCol = state.CurrentMapCoord?.col ?? -1,
+            MapRow = state.CurrentMapCoord?.row ?? -1,
         };
 
         if (runManager.NetService.Type == NetGameType.Host)
@@ -99,12 +101,12 @@ internal static class NndxOverlaySync
 
     private static void ReceiveCore(NndxOverlaySyncMessage message, ulong senderNetId)
     {
-        if (!IsNetworkedMultiplayer() || !CombatManager.Instance.IsInProgress)
+        if (!IsNetworkedMultiplayer() || !NndxRoomContext.CanPlay())
         {
             return;
         }
 
-        Player? localPlayer = LocalContext.GetMe(CombatManager.Instance.DebugOnlyGetState());
+        Player? localPlayer = LocalContext.GetMe(NndxRoomContext.State);
         // A host relay has the host's sender ID, but may still describe our own player.
         if (localPlayer == null || message.PlayerNetId == localPlayer.NetId)
         {
@@ -117,14 +119,17 @@ internal static class NndxOverlaySync
             return;
         }
 
-        var state = CombatManager.Instance.DebugOnlyGetState();
+        var state = NndxRoomContext.State;
         if (!message.IsValid || state?.GetPlayer(message.PlayerNetId) == null
-            || state.RunState.CurrentRoom?.Id != message.RoomId || state.RunState.Rng.Seed != message.RunSeed)
+            || state.CurrentRoom?.Id != message.RoomId || state.Rng.Seed != message.RunSeed
+            || state.CurrentActIndex != message.ActIndex
+            || (state.CurrentMapCoord?.col ?? -1) != message.MapCol
+            || (state.CurrentMapCoord?.row ?? -1) != message.MapRow)
             return;
         if (_sequenceScope == null || !_sequenceScope.TryGetTarget(out var previousState)
             || !ReferenceEquals(previousState, state))
         {
-            _sequenceScope = new WeakReference<CombatState>(state);
+            _sequenceScope = new WeakReference<RunState>(state);
             ReceivedSequences.Clear();
         }
         if (ReceivedSequences.TryGetValue(message.PlayerNetId, out ulong last) && message.Sequence <= last)

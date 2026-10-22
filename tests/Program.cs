@@ -203,6 +203,8 @@ Run("Production input controller validates, suspends, restores and dispatches lo
     try
     {
         NCreature creature = Setup(278, 1);
+        var portrait = AddPortrait(1001);
+        var originalPortrait = portrait.Icon.Texture;
         ProjectSettings.UserPath = directory;
         MegaCrit.Sts2.Core.Nodes.NGame.Instance = new();
         var input = MegaCrit.Sts2.Core.Nodes.CommonUi.NInputManager.Instance!;
@@ -274,10 +276,36 @@ Run("Production input controller validates, suspends, restores and dispatches lo
         Time.Now += 1000;
         controller._UnhandledInput(new InputEventJoypadButton { Pressed = true, ButtonIndex = JoyButton.Paddle1 });
         Check(creature.Visuals.Body.Visible, "Native controller input must not trigger playback");
+        MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance = new() { IsOpen = true };
+        Time.Now += 1000;
+        keyboardHandle.Invoke();
+        Check(LiveAudio().Count() == 1 && !Sprite(creature).Visible
+            && !ReferenceEquals(portrait.Icon.Texture, originalPortrait),
+            "Keyboard on the map must start sound/portrait with the body animation hidden");
+        MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance.IsOpen = false;
+        MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext.ActiveScreenContext.Instance.Update();
+        Check(Sprite(creature).Visible, "Closing the map must reveal the ongoing animation");
+        MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance.IsOpen = true;
+        MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext.ActiveScreenContext.Instance.Update();
+        Time.Now += 1000;
+        keyboardHandle.Invoke();
+        Check(!LiveAudio().Any() && creature.Visuals.Body.Visible
+            && ReferenceEquals(portrait.Icon.Texture, originalPortrait),
+            "Keyboard on the map must also stop playback and restore the portrait/body");
+        MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance = null;
         MegaCrit.Sts2.Core.Nodes.Screens.Overlays.NOverlayStack.Instance = new() { ScreenCount = 1 };
         Time.Now += 1000;
         keyboardHandle.Invoke();
-        Check(creature.Visuals.Body.Visible, "Settings/overlay screens must suppress playback");
+        Check(LiveAudio().Count() == 1 && Sprite(creature).Visible,
+            "An overlay with the multiplayer portrait visible must allow playback");
+        Time.Now += 150; keyboardHandle.Invoke();
+        MegaCrit.Sts2.Core.Nodes.Screens.Capstones.NCapstoneContainer.Instance = new() { InUse = true };
+        Time.Now += 150; keyboardHandle.Invoke();
+        Check(LiveAudio().Count() == 1 && !Sprite(creature).Visible,
+            "Deck/capstone screen must allow audio and portrait without drawing the body above it");
+        Time.Now += 150; keyboardHandle.Invoke();
+        Check(!LiveAudio().Any() && creature.Visuals.Body.Visible, "Deck screen must allow stopping playback too");
+        MegaCrit.Sts2.Core.Nodes.Screens.Capstones.NCapstoneContainer.Instance = null;
         MegaCrit.Sts2.Core.Nodes.Screens.Overlays.NOverlayStack.Instance = null;
         MegaCrit.Sts2.Core.Nodes.Debug.NDevConsole.Instance!.Visible = true;
         keyboardHandle.Invoke();
@@ -399,14 +427,15 @@ Run("Versioned sync messages round-trip every field and reject malformed payload
 {
     var message = Message(2002, true, 123, 3);
     byte[] data = NndxOverlaySyncMessage.Serialize(message);
-    Check(data.Length == 26, "Payload must stay bounded at 26 bytes");
+    Check(data.Length == 38, "Payload must stay bounded at 38 bytes");
     var decoded = NndxOverlaySyncMessage.Deserialize(data);
     Check(decoded.PlayerNetId == 2002 && decoded.IsPlaying && decoded.FaceIndex == 3
-        && decoded.Sequence == 123 && decoded.RunSeed == 123 && decoded.RoomId == 42,
+        && decoded.Sequence == 123 && decoded.RunSeed == 123 && decoded.RoomId == 42
+        && decoded.ActIndex == 0 && decoded.MapCol == 3 && decoded.MapRow == 7,
         "Sync must preserve player, chosen portrait, order and combat scope");
     var stop = NndxOverlaySyncMessage.Deserialize(NndxOverlaySyncMessage.Serialize(Message(2002, false, 124)));
     Check(!stop.IsPlaying && stop.FaceIndex == 255, "Stop payload must have no face");
-    foreach (int length in new[] { 0, 9, 25, 27 }) ExpectInvalid(new byte[length]);
+    foreach (int length in new[] { 0, 9, 25, 26, 37, 39 }) ExpectInvalid(new byte[length]);
     byte[] invalidFlag = (byte[])data.Clone(); invalidFlag[0] = 2; ExpectInvalid(invalidFlag);
     byte[] invalidFace = (byte[])data.Clone(); invalidFace[9] = NndxPortraitSwap.FaceCount; ExpectInvalid(invalidFace);
     byte[] zeroSequence = (byte[])data.Clone(); Array.Clear(zeroSequence, 10, 8); ExpectInvalid(zeroSequence);
@@ -489,6 +518,291 @@ Run("Rapid local toggles share the chosen portrait and remain bounded without re
     Check(Node.All.OfType<AudioStreamPlayer>().All(x => x.Freed), "Stopped rapid toggles must not leak live audio nodes");
     Check(creature.Visuals.Body.Visible, "Rapid toggles must finish with original body restored");
 });
+Run("Bodyless rooms play audio and portraits, finish naturally and ignore stale callbacks", () =>
+{
+    var creature = SetupRoom(MegaCrit.Sts2.Core.Rooms.RoomType.Event);
+    var panel = AddPortrait(1001);
+    var original = panel.Icon.Texture;
+    NndxVideoOverlay.StartForPlayer(1001, true, true, 2);
+    Check(ReferenceEquals(panel.Icon.Texture, Face(2)), "Bodyless event must change the portrait");
+    Check(creature.Visuals.Body.Visible && !LiveSprites().Any(), "Bodyless event must not hide a stale combat body");
+    var audio = LiveAudio().Single();
+    var oldFinish = audio.CaptureFinished();
+    var oldTimeout = Node.Tree.Timers.Last().CaptureTimeout();
+    audio.Finish();
+    Check(ReferenceEquals(panel.Icon.Texture, original), "Audio completion must restore the portrait without a sprite");
+    NndxVideoOverlay.StartForPlayer(1001, true, true, 3);
+    var replacement = LiveAudio().Single();
+    oldFinish(); oldTimeout();
+    Check(replacement.Playing && !replacement.IsQueuedForDeletion(), "Stale audio/timer must not stop the replacement");
+    Node.Tree.Timers.Last().Expire();
+    Check(ReferenceEquals(panel.Icon.Texture, original) && !LiveAudio().Any(), "Timeout must recover missing audio completion");
+});
+Run("All non-rest room kinds use a safe fallback and rest sites reject local and remote playback", () =>
+{
+    foreach (var kind in new[] { MegaCrit.Sts2.Core.Rooms.RoomType.Event, MegaCrit.Sts2.Core.Rooms.RoomType.Treasure,
+        MegaCrit.Sts2.Core.Rooms.RoomType.Shop, MegaCrit.Sts2.Core.Rooms.RoomType.Map, MegaCrit.Sts2.Core.Rooms.RoomType.Unassigned })
+    {
+        SetupRoom(kind);
+        AddPortrait(1001);
+        Time.Now += 1000;
+        NndxVideoOverlay.Toggle();
+        Check(LiveAudio().Count() == 1 && !LiveSprites().Any(), $"Unknown body in {kind} must play audio only");
+        Time.Now += 150;
+        NndxVideoOverlay.Toggle();
+        Check(!LiveAudio().Any(), "Second key press must stop audio-only playback");
+    }
+    SetupRoom(MegaCrit.Sts2.Core.Rooms.RoomType.RestSite);
+    AddRemoteWithoutBody(2002);
+    var panel = AddPortrait(2002);
+    var original = panel.Icon.Texture;
+    NndxVideoOverlay.Toggle();
+    NndxVideoOverlay.StartForPlayer(2002, false, faceIndex: 1);
+    DeliverRoom(Message(2002, true, 20, 1));
+    Check(!LiveAudio().Any() && !LiveSprites().Any() && ReferenceEquals(panel.Icon.Texture, original),
+        "Rest site must reject local, direct and network starts");
+});
+Run("Visual-only event bodies animate without an active combat, including Architect layouts", () =>
+{
+    var creature = Setup(278, 0.5f);
+    CombatManager.Instance.State.RunState.CurrentRoom = new() { RoomType = MegaCrit.Sts2.Core.Rooms.RoomType.Event };
+    CombatManager.Instance.IsInProgress = false;
+    NCombatRoom.Instance!.Mode = MegaCrit.Sts2.Core.Rooms.CombatRoomMode.VisualOnly;
+    NndxVideoOverlay.StartForPlayer(1001, false);
+    AssertGeometry(creature, Sprite(creature), 208.5f);
+    Check(!creature.Visuals.Body.Visible, "Visible event body must be replaced");
+    NndxVideoOverlay.StopForPlayer(1001, false);
+    Check(creature.Visuals.Body.Visible, "Event body must be restored");
+    creature.Visuals.Visible = false;
+    NndxVideoOverlay.StartForPlayer(1001, false);
+    Check(!LiveSprites().Any() && LiveAudio().Any(), "Hidden event bodies must fall back to audio");
+});
+Run("Merchant replacements preserve anchors, scale and multiplayer player identity", () =>
+{
+    SetupRoom(MegaCrit.Sts2.Core.Rooms.RoomType.Shop);
+    AddRemoteWithoutBody(2002);
+    AddRemoteWithoutBody(3003);
+    // Run order differs from the local-first shop order on this client.
+    var state = CombatManager.Instance.State.RunState;
+    var me = state.Players[0]; state.Players.Remove(me); state.Players.Insert(1, me);
+    var shop = new NMerchantRoom();
+    MegaCrit.Sts2.Core.Nodes.NRun.Instance!.MerchantRoom = shop;
+    foreach (int i in new[] { 0, 1, 2 })
+    {
+        var character = new MegaCrit.Sts2.Core.Nodes.Screens.Shops.NMerchantCharacter
+            { Position = new(500 - i * 275, 500), Scale = Vector2.One * 1.2f };
+        character.AddChild(new MegaCrit.Sts2.Core.Bindings.MegaSpine.TestSpineSprite { Scale = Vector2.One * 0.47f });
+        shop.PlayerVisuals.Add(character);
+    }
+    NndxVideoOverlay.StartForPlayer(2002, false);
+    var target = shop.PlayerVisuals[1];
+    var sprite = target.Children.OfType<AnimatedSprite2D>().Single();
+    Check(!target.Children.OfType<MegaCrit.Sts2.Core.Bindings.MegaSpine.TestSpineSprite>().Single().Visible,
+        "Remote player's own merchant body must be hidden");
+    Check(shop.PlayerVisuals[0].Children.OfType<MegaCrit.Sts2.Core.Bindings.MegaSpine.TestSpineSprite>().Single().Visible,
+        "Local player's merchant body must be untouched");
+    var foot = sprite.ToGlobal(sprite.Offset + new Vector2(135, 315));
+    Near(foot.X, target.GlobalPosition.X, "Shop foot X"); Near(foot.Y, target.GlobalPosition.Y, "Shop foot Y");
+    Near(sprite.Scale.Y * 330, 600 * 0.47f * 1.5f, "Shop body-local height");
+    NndxVideoOverlay.ForceStop();
+    Check(target.Children.OfType<MegaCrit.Sts2.Core.Bindings.MegaSpine.TestSpineSprite>().Single().Visible,
+        "Merchant body must be restored");
+    target.Children.OfType<MegaCrit.Sts2.Core.Bindings.MegaSpine.TestSpineSprite>().Single().SkeletonReady = false;
+    NndxVideoOverlay.StartForPlayer(2002, false);
+    Check(!LiveSprites().Any() && LiveAudio().Count() == 1,
+        "Unready merchant skeleton must fall back safely without hiding its body");
+});
+Run("Fake Merchant maps reversed visual children to local-first players", () =>
+{
+    SetupRoom(MegaCrit.Sts2.Core.Rooms.RoomType.Event);
+    AddRemoteWithoutBody(2002);
+    var fake = new MegaCrit.Sts2.Core.Nodes.Events.Custom.NFakeMerchant();
+    var container = new Control(); fake.AddChild(container);
+    var remote = CreateVisuals(278, 0.5f);
+    var local = CreateVisuals(335, 2f);
+    container.AddChild(remote); container.AddChild(local);
+    MegaCrit.Sts2.Core.Nodes.NRun.Instance!.EventRoom = new() { CustomEventNode = fake };
+    NndxVideoOverlay.StartForPlayer(2002, false);
+    Check(!remote.Body.Visible && local.Body.Visible, "Fake Merchant must replace only the requested player's visual");
+    var sprite = remote.Children.OfType<AnimatedSprite2D>().Single();
+    var foot = sprite.ToGlobal(sprite.Offset + new Vector2(135, 315));
+    Near(foot.Y, remote.GlobalPosition.Y, "Fake merchant foot Y");
+    Near(sprite.Scale.Y * 330, 417, "Fake merchant body-local height");
+    NndxVideoOverlay.ForceStop();
+    Check(remote.Body.Visible, "Fake Merchant body must restore");
+});
+Run("Room, combat and run boundaries immediately clear playback and prevent reward retriggers", () =>
+{
+    foreach (Type hook in new[] { typeof(NndxRoomDeparturePatch), typeof(NndxCombatSetupPatch), typeof(NndxTravelAndExitPatch) })
+    {
+        var creature = Setup(278, 1);
+        var panel = AddPortrait(1001); var original = panel.Icon.Texture;
+        NndxVideoOverlay.StartForPlayer(1001, false);
+        InvokePrefix(hook);
+        Check(creature.Visuals.Body.Visible && !LiveAudio().Any() && !LiveSprites().Any()
+            && ReferenceEquals(panel.Icon.Texture, original), "Boundary prefix must restore every component immediately");
+        NndxVideoOverlay.StartForPlayer(1001, false);
+        Check(!LiveAudio().Any(), "Old room must stay blocked while asynchronous transition is pending");
+        CombatManager.Instance.State.RunState.CurrentRoom = new() { Id = 43 };
+        CombatManager.Instance.IsInProgress = false; NCombatRoom.Instance = null;
+        NndxVideoOverlay.StartForPlayer(1001, false);
+        Check(LiveAudio().Any(), "Next room must be playable");
+    }
+    Setup(278, 1);
+    NndxRoomContext.BeginTransition();
+    NndxRoomContext.CombatStarting();
+    NndxVideoOverlay.StartForPlayer(1001, false);
+    Check(LiveSprites().Any(), "New combat must release its setup barrier");
+    NndxVideoOverlay.ForceStop();
+    CombatManager.Instance.IsInProgress = false;
+    NndxVideoOverlay.StartForPlayer(1001, false);
+    Check(!LiveAudio().Any(), "Finished combat must not allow audio-only fallback behind rewards");
+    CombatManager.Instance.IsInProgress = true; CombatManager.Instance.IsEnding = true;
+    NndxVideoOverlay.StartForPlayer(1001, false);
+    Check(!LiveAudio().Any(), "Ending combat must reject new playback");
+    SetupRoom(MegaCrit.Sts2.Core.Rooms.RoomType.Event);
+    var eventPanel = AddPortrait(1001); var eventOriginal = eventPanel.Icon.Texture;
+    NndxVideoOverlay.StartForPlayer(1001, false);
+    MegaCrit.Sts2.Core.Nodes.NRun.Instance!.Free();
+    Check(!LiveAudio().Any() && ReferenceEquals(eventPanel.Icon.Texture, eventOriginal),
+        "Run tree exit must stop bodyless sessions too");
+});
+Run("Victory rewards and map both allow fresh playback while preserving battle-end and room-exit cleanup", () =>
+{
+    var creature = Setup(278, 1);
+    var panel = AddPortrait(1001); var original = panel.Icon.Texture;
+    NndxVideoOverlay.StartForPlayer(1001, false, locallyControlled: true);
+    InvokePrefix(typeof(NndxCombatBoundaryPatch));
+    Check(!LiveAudio().Any() && creature.Visuals.Body.Visible, "Combat end must stop the old session");
+    CombatManager.Instance.IsInProgress = false;
+    CombatManager.Instance.State.RunState.CurrentRoom.IsPreFinished = true;
+    MegaCrit.Sts2.Core.Nodes.Screens.Overlays.NOverlayStack.Instance = new() { ScreenCount = 1 };
+    Time.Now += 1000; NndxVideoOverlay.Toggle();
+    Check(LiveAudio().Count() == 1 && Sprite(creature).Visible && !creature.Visuals.Body.Visible
+        && !ReferenceEquals(panel.Icon.Texture, original),
+        "Reward view with visible portrait and body must start all effects");
+    MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance = new() { IsOpen = true };
+    MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext.ActiveScreenContext.Instance.Update();
+    Check(!Sprite(creature).Visible && LiveAudio().Any(), "Opening map must only hide the body animation");
+    Time.Now += 150; NndxVideoOverlay.Toggle();
+    Check(!LiveAudio().Any() && ReferenceEquals(panel.Icon.Texture, original), "Map key must stop playback");
+    Time.Now += 150; NndxVideoOverlay.Toggle();
+    Check(LiveAudio().Any() && !Sprite(creature).Visible, "Map key must start playback with animation hidden");
+    MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance.IsOpen = false;
+    MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext.ActiveScreenContext.Instance.Update();
+    Check(Sprite(creature).Visible, "Returning to rewards with a visible body must show the ongoing animation");
+    InvokePrefix(typeof(NndxTravelAndExitPatch));
+    Check(!LiveAudio().Any() && ReferenceEquals(panel.Icon.Texture, original), "Map travel must stop all effects");
+    Time.Now += 150; NndxVideoOverlay.Toggle();
+    Check(!LiveAudio().Any(), "Visible portrait must not bypass a genuine departure barrier");
+    MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance = null;
+    MegaCrit.Sts2.Core.Nodes.Screens.Overlays.NOverlayStack.Instance = null;
+});
+Run("Local multiplayer input follows portrait visibility; solo and remote playback are independent", () =>
+{
+    SetupRoom(MegaCrit.Sts2.Core.Rooms.RoomType.Event);
+    Time.Now += 1000; NndxVideoOverlay.Toggle();
+    Check(!LiveAudio().Any(), "Without the multiplayer portrait local key must not trigger");
+    var panel = AddPortrait(1001); var original = panel.Icon.Texture;
+    panel.Icon.Visible = false;
+    NndxVideoOverlay.Toggle();
+    Check(!LiveAudio().Any(), "A hidden multiplayer portrait must not allow a new local start");
+    panel.Icon.Visible = true;
+    MegaCrit.Sts2.Core.Nodes.Screens.Capstones.NCapstoneContainer.Instance = new() { InUse = true };
+    NndxVideoOverlay.Toggle();
+    Check(LiveAudio().Count() == 1 && !LiveSprites().Any() && !ReferenceEquals(panel.Icon.Texture, original),
+        "Bodyless screen with visible portrait must still play audio and change portrait");
+    Time.Now += 150; NndxVideoOverlay.Toggle();
+    Check(!LiveAudio().Any() && ReferenceEquals(panel.Icon.Texture, original), "Repeated key must restore bodyless playback");
+    CombatManager.Instance.State.GetPlayer(1001)!.Creature.IsDead = true;
+    Time.Now += 150; NndxVideoOverlay.Toggle();
+    Check(LiveAudio().Count() == 1 && !LiveSprites().Any(),
+        "A spectating player with a visible portrait must still be able to laugh without a body");
+    MegaCrit.Sts2.Core.Nodes.Screens.Capstones.NCapstoneContainer.Instance = null;
+    SetupRoom(MegaCrit.Sts2.Core.Rooms.RoomType.Event);
+    RunManager.Instance!.NetService.Type = NetGameType.Singleplayer;
+    NndxVideoOverlay.Toggle();
+    Check(LiveAudio().Count() == 1, "Solo playback must remain available without multiplayer UI");
+});
+Run("Post-victory network playback does not depend on whether the receiver has opened its map", () =>
+{
+    Setup(278, 1);
+    var remote = AddRemote(2002); var panel = AddPortrait(2002); var original = panel.Icon.Texture;
+    CombatManager.Instance.IsInProgress = false;
+    CombatManager.Instance.State.RunState.CurrentRoom.IsPreFinished = true;
+    RunManager.Instance!.NetService.Type = NetGameType.Host;
+    RitsuLibSidecarTypedMessageRegistry.Sent.Clear();
+    DeliverRoom(Message(2002, true, 10, 2));
+    Check(ReferenceEquals(panel.Icon.Texture, Face(2)) && LiveAudio().Count() == 1 && Sprite(remote).Visible
+        && !remote.Visuals.Body.Visible && RitsuLibSidecarTypedMessageRegistry.Sent.Count == 1,
+        "Host with map closed must still apply and relay the remote map player's audio and portrait");
+    DeliverRoom(Message(2002, false, 11));
+    Check(!LiveAudio().Any() && ReferenceEquals(panel.Icon.Texture, original), "Remote stop must restore even while receiver's map is closed");
+    CombatManager.Instance.State.RunState.CurrentRoom.IsPreFinished = false;
+    MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance = new() { IsOpen = true };
+    DeliverRoom(Message(2002, true, 12, 1));
+    NndxVideoOverlay.Toggle();
+    Check(!LiveAudio().Any(), "Defeat or unfinished combat cleanup must remain blocked even with a map open");
+    MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance = null;
+});
+Run("Opening screens preserves audio, hides animation and restores it when the screen closes", () =>
+{
+    var creature = Setup(278, 1);
+    NndxVideoOverlay.StartForPlayer(1001, false);
+    var sprite = Sprite(creature);
+    MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance = new() { IsOpen = true };
+    MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext.ActiveScreenContext.Instance.Update();
+    Check(!sprite.Visible && LiveAudio().Any(), "Opening map must hide animation without ending playback");
+    MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance = null;
+    MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext.ActiveScreenContext.Instance.Update();
+    Check(sprite.Visible && LiveAudio().Any(), "Closing map must restore playback visibility");
+    InvokePrefix(typeof(NndxRoomScenePatch));
+    Check(creature.Visuals.Body.Visible && !LiveAudio().Any(), "Replacing the actual room scene must clear playback");
+});
+Run("Multiplayer bodyless playback relays one selected face and rejects reused room IDs at other map locations", () =>
+{
+    SetupRoom(MegaCrit.Sts2.Core.Rooms.RoomType.Event);
+    AddRemoteWithoutBody(2002);
+    var panel = AddPortrait(2002); var original = panel.Icon.Texture;
+    RunManager.Instance!.NetService.Type = NetGameType.Host;
+    RitsuLibSidecarTypedMessageRegistry.Sent.Clear();
+    DeliverRoom(Message(2002, true, 10, 3));
+    Check(ReferenceEquals(panel.Icon.Texture, Face(3)) && LiveAudio().Count() == 1 && !LiveSprites().Any(),
+        "Host must display and relay bodyless playback");
+    Check(RitsuLibSidecarTypedMessageRegistry.Sent.Count == 1, "Host must relay one accepted start");
+    NndxRoomContext.BeginTransition();
+    CombatManager.Instance.State.RunState.CurrentRoom = new() { Id = 42 };
+    CombatManager.Instance.State.RunState.CurrentMapCoord = new(4, 8);
+    DeliverRoom(Message(2002, true, 20, 1));
+    Check(!LiveAudio().Any() && ReferenceEquals(panel.Icon.Texture, original), "Same room ID on another map tile must reject old start");
+    DeliverRoom(new() { PlayerNetId = 2002, IsPlaying = true, FaceIndex = 2, Sequence = 30,
+        RunSeed = 123, RoomId = 42, MapCol = 4, MapRow = 8 });
+    Check(ReferenceEquals(panel.Icon.Texture, Face(2)), "Current tile message must still play");
+    InvokePrefix(typeof(NndxPlayerDisconnectedPatch), 2002UL);
+    Check(!LiveAudio().Any() && ReferenceEquals(panel.Icon.Texture, original), "Disconnect must stop that player");
+    NndxRoomContext.BeginTransition();
+    CombatManager.Instance.State.RunState.CurrentRoom = new() { Id = 42 };
+    CombatManager.Instance.State.RunState.CurrentActIndex = 1;
+    DeliverRoom(new() { PlayerNetId = 2002, IsPlaying = true, FaceIndex = 0, Sequence = 40,
+        RunSeed = 123, RoomId = 42, MapCol = 4, MapRow = 8 });
+    Check(!LiveAudio().Any(), "Same coordinates in another act must reject old start");
+});
+Run("Rapid bodyless toggles stay bounded and audio startup errors release their session", () =>
+{
+    SetupRoom(MegaCrit.Sts2.Core.Rooms.RoomType.Event);
+    var panel = AddPortrait(1001); var original = panel.Icon.Texture;
+    AudioStreamPlayer.FailNextPlay = true;
+    NndxVideoOverlay.StartForPlayer(1001, false);
+    Check(!LiveAudio().Any() && ReferenceEquals(panel.Icon.Texture, original), "Failed audio startup must roll back");
+    for (int i = 0; i < 120; i++)
+    {
+        Time.Now += 150; NndxVideoOverlay.Toggle();
+        for (int j = 0; j < 20; j++) NndxVideoOverlay.Toggle();
+        Check(LiveAudio().Count() <= 1 && !LiveSprites().Any(), "Repeated input must not accumulate playback");
+        Node.FlushDeletion();
+    }
+    Check(!LiveAudio().Any() && ReferenceEquals(panel.Icon.Texture, original), "Final toggle must restore portrait");
+});
 NndxVideoOverlay.ForceStop();
 Node.FlushDeletion();
 Console.WriteLine($"PASS: {passed} regression groups");
@@ -512,9 +826,14 @@ static NCreature Setup(float height, float scale)
     Node.FlushDeletion();
     Node.All.Clear();
     Node.Tree.Timers.Clear();
-    MegaCrit.Sts2.Core.Nodes.NRun.Instance = null;
+    MegaCrit.Sts2.Core.Nodes.NRun.Instance = new();
+    MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance = null;
+    MegaCrit.Sts2.Core.Nodes.Screens.Capstones.NCapstoneContainer.Instance = null;
+    MegaCrit.Sts2.Core.Nodes.Screens.Overlays.NOverlayStack.Instance = null;
     CombatManager.Instance.State = new();
     CombatManager.Instance.IsInProgress = true;
+    CombatManager.Instance.IsEnding = false;
+    CombatManager.Instance.IsStarting = false;
     NCombatRoom.Instance = new();
     RunManager.Instance = new();
     RunManager.Instance.NetService.Type = NetGameType.Client;
@@ -573,7 +892,7 @@ static Texture2D Face(byte index) => (Texture2D)ResourceLoader.Resources[$"res:/
 
 static NndxOverlaySyncMessage Message(ulong player, bool playing, ulong sequence, byte face = 0)
     => new() { PlayerNetId = player, IsPlaying = playing, FaceIndex = playing ? face : (byte)255,
-        Sequence = sequence, RunSeed = 123, RoomId = 42 };
+        Sequence = sequence, RunSeed = 123, RoomId = 42, MapCol = 3, MapRow = 7 };
 
 static (MegaCrit.Sts2.Core.Nodes.Multiplayer.NMultiplayerPlayerState Panel, TextureRect Icon) AddPortrait(ulong player)
 {
@@ -601,3 +920,33 @@ static NCreature AddRemote(ulong id)
     NCombatRoom.Instance!.CreatureNodes.Add(creature);
     return creature;
 }
+
+static NCreature SetupRoom(MegaCrit.Sts2.Core.Rooms.RoomType kind)
+{
+    var creature = Setup(278, 1);
+    NCombatRoom.Instance = null;
+    CombatManager.Instance.IsInProgress = false;
+    CombatManager.Instance.State.RunState.CurrentRoom = new() { RoomType = kind };
+    return creature;
+}
+static void AddRemoteWithoutBody(ulong id)
+{
+    var entity = new Creature();
+    var player = new Player { NetId = id, Creature = entity }; entity.Player = player;
+    CombatManager.Instance.State.Players.Add(player);
+}
+static NCreatureVisuals CreateVisuals(float height, float scale)
+{
+    var visuals = new NCreatureVisuals { Scale = Vector2.One * scale };
+    visuals.AddChild(visuals.Body); visuals.AddChild(visuals.Bounds);
+    visuals.Bounds.Size = new(242, height);
+    return visuals;
+}
+static IEnumerable<AnimatedSprite2D> LiveSprites() => Node.All.OfType<AnimatedSprite2D>().Where(n => !n.Freed && !n.IsQueuedForDeletion());
+static IEnumerable<AudioStreamPlayer> LiveAudio() => Node.All.OfType<AudioStreamPlayer>().Where(n => !n.Freed && !n.IsQueuedForDeletion());
+static void DeliverRoom(NndxOverlaySyncMessage message)
+{
+    RitsuLibSidecarTypedMessageRegistry.Deliver(message, message.PlayerNetId); Callable.Flush();
+}
+static void InvokePrefix(Type type, params object[] args) => type.GetMethod("Prefix",
+    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.Invoke(null, args);

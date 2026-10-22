@@ -42,11 +42,25 @@ internal static class NndxPortraitSwap
     internal static Handle? Apply(ulong playerNetId, byte face)
     {
         if (RunManager.Instance?.NetService.Type is not (NetGameType.Host or NetGameType.Client)) return null;
+        var panel = FindPanel(playerNetId);
+        return panel == null ? null : Apply(panel, face);
+    }
+
+    internal static bool HasVisiblePortrait(ulong playerNetId)
+    {
+        var panel = FindPanel(playerNetId);
+        var icon = panel?.GetNodeOrNull<TextureRect>("%CharacterIcon");
+        return NndxRoomContext.IsUsable(panel) && NndxRoomContext.IsUsable(icon)
+            && icon!.IsVisibleInTree();
+    }
+
+    private static NMultiplayerPlayerState? FindPanel(ulong playerNetId)
+    {
         var container = NRun.Instance?.GlobalUi?.MultiplayerPlayerContainer;
-        if (container == null) return null;
-        foreach (Node child in container.GetChildren())
+        if (!NndxRoomContext.IsUsable(container)) return null;
+        foreach (Node child in container!.GetChildren())
             if (child is NMultiplayerPlayerState state && state.Player.NetId == playerNetId)
-                return Apply(state, face);
+                return state;
         return null;
     }
 

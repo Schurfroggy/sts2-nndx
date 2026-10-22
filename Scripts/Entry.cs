@@ -20,9 +20,9 @@ public static class Entry
         NndxInput.Initialize();
 
         NndxOverlaySync.Initialize();
-        new Harmony(ModId + ".portraits").PatchAll(typeof(Entry).Assembly);
+        new Harmony(ModId + ".patches").PatchAll(typeof(Entry).Assembly);
 
-        RitsuLibFramework.SubscribeLifecycle<CombatStartingEvent>(_ => NndxVideoOverlay.Preload());
+        RitsuLibFramework.SubscribeLifecycle<CombatStartingEvent>(_ => NndxRoomContext.CombatStarting());
         RitsuLibFramework.SubscribeLifecycle<CombatEndedEvent>(_ =>
         {
             NndxVideoOverlay.ForceStop();

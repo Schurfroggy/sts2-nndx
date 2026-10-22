@@ -70,7 +70,7 @@ public partial class NndxInput : Node
     {
         if (!NGame.IsGameFocusedWindow() || NGame.Instance?.Transition.InTransition != false
             || NDevConsole.Instance?.Visible == true
-            || !NndxVideoOverlay.ShouldShowOverlaySprites()) return;
+            || !NndxVideoOverlay.CanToggleInCurrentScreen()) return;
         if (Engine.GetMainLoop() is SceneTree tree
             && tree.Root.GuiGetFocusOwner() is LineEdit or TextEdit) return;
         NndxVideoOverlay.Toggle();

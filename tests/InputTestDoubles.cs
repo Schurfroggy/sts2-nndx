@@ -27,7 +27,6 @@ namespace Godot
         public SizeFlags SizeFlagsHorizontal;
         public MouseFilterEnum MouseFilter;
         public Vector2 CustomMinimumSize;
-        public bool IsVisibleInTree() => Visible;
         public bool HasFocus() => Node.Tree.Root.Focus == this;
         public void GrabFocus() => Node.Tree.Root.Focus = this;
         public void AddThemeFontOverride(string name, object font) { }
@@ -92,9 +91,12 @@ namespace MegaCrit.Sts2.Core.ControllerInput
 }
 namespace MegaCrit.Sts2.Core.Nodes
 {
-    public class NRun
+    public class NRun : Godot.Node
     {
         public static NRun? Instance;
+        public MegaCrit.Sts2.Core.Nodes.Rooms.NMerchantRoom? MerchantRoom { get; set; }
+        public MegaCrit.Sts2.Core.Nodes.Rooms.NEventRoom? EventRoom { get; set; }
+        public void SetCurrentRoom(Godot.Control? node) { }
         public PortraitTestGlobalUi GlobalUi { get; } = new();
     }
     public class PortraitTestGlobalUi
@@ -105,6 +107,8 @@ namespace MegaCrit.Sts2.Core.Nodes
     public class NGame : Godot.Node
     {
         public static NGame? Instance;
+        public void ReturnToMainMenu() { }
+        public void Quit() { }
         public static bool Focused = true;
         public static bool IsGameFocusedWindow() => Focused;
         public TransitionState Transition = new();
@@ -265,10 +269,17 @@ namespace MegaCrit.Sts2.Core.Nodes.Multiplayer
 namespace HarmonyLib
 {
     [AttributeUsage(AttributeTargets.Class)]
-    public class HarmonyPatch(Type type, string method) : Attribute
+    public class HarmonyPatch : Attribute
     {
-        public string Target => type.Name + method;
+        public HarmonyPatch() { }
+        public HarmonyPatch(Type type, string method) { }
     }
+    public static class AccessTools
+    {
+        public static System.Reflection.MethodInfo Method(Type type, string name) => type.GetMethod(name)!;
+    }
+    [AttributeUsage(AttributeTargets.Method)]
+    public class HarmonyPrefix : Attribute { }
     [AttributeUsage(AttributeTargets.Method)]
     public class HarmonyPostfix : Attribute { }
 }

@@ -1,16 +1,17 @@
 using Godot;
 using MegaCrit.Sts2.Core.Audio.Debug;
-using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Multiplayer.Game;
+using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.Multiplayer;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Nodes.Screens.Capstones;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
-using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext;
+using MegaCrit.Sts2.Core.Runs;
 
 namespace Nndx.Scripts;
 
@@ -48,9 +49,11 @@ internal static class NndxVideoOverlay
     {
         public required ulong PlayerNetId { get; init; }
 
-        public required NCreature Creature { get; init; }
+        public required Node Owner { get; init; }
 
-        public required Node2D Body { get; init; }
+        public Node2D? Body { get; init; }
+
+        public Action? OwnerExiting { get; set; }
 
         public bool IsLocallyControlled { get; init; }
 
@@ -136,11 +139,6 @@ internal static class NndxVideoOverlay
                 return;
             }
 
-            if (GetCreatureForPlayer(localNetId) == null)
-            {
-                return;
-            }
-
             StartForPlayer(localNetId, broadcast: true, locallyControlled: true);
         }
         catch (Exception ex)
@@ -161,29 +159,19 @@ internal static class NndxVideoOverlay
             return;
         }
 
-        NCreature? creatureNode = GetCreatureForPlayer(playerNetId);
-        if (creatureNode == null)
-        {
-            Entry.Logger.Error($"NNDX overlay could not find creature for player {playerNetId}.");
-            return;
-        }
-
-        SpriteFrames? spriteFrames = GetSpriteFrames();
-        if (spriteFrames == null)
-        {
-            Entry.Logger.Error($"NNDX overlay unavailable. Missing {SheetPath} in sts_nndx.pck?");
-            return;
-        }
-
+        if (!NndxRoomContext.CanPlay()
+            || NndxRoomContext.State?.GetPlayer(playerNetId) is not { } player
+            || NRun.Instance is not { } owner) return;
         if (faceIndex is >= NndxPortraitSwap.FaceCount) return;
-        Node2D body = creatureNode.Visuals.GetCurrentBody();
+
+        var target = NndxRoomContext.FindBody(playerNetId);
         PlayerOverlaySession session = new()
         {
             PlayerNetId = playerNetId,
-            Creature = creatureNode,
-            Body = body,
+            Owner = owner,
+            Body = target?.Body,
             IsLocallyControlled = locallyControlled,
-            BodyWasVisible = body.Visible,
+            BodyWasVisible = target?.Body.Visible ?? false,
             // Cosmetic RNG is independent of the run's deterministic RNG streams.
             FaceIndex = faceIndex ?? (byte)System.Random.Shared.Next(NndxPortraitSwap.FaceCount),
         };
@@ -193,28 +181,32 @@ internal static class NndxVideoOverlay
         _sessions[playerNetId] = session;
         try
         {
-            body.Visible = false;
-
-            AnimatedSprite2D animatedSprite = new()
-            {
-                SpriteFrames = spriteFrames,
-                Animation = AnimationName,
-                Centered = false,
-                ZAsRelative = true,
-                ZIndex = 0,
-            };
-
-            session.Sprite = animatedSprite;
             session.PlaybackEnded = () => OnPlaybackEnded(session);
-            animatedSprite.AnimationFinished += session.PlaybackEnded;
-            animatedSprite.TreeExiting += session.PlaybackEnded;
-            creatureNode.Visuals.AddChild(animatedSprite);
-            creatureNode.Visuals.MoveChild(animatedSprite, 0);
-            ApplyLayout(creatureNode, animatedSprite);
-            animatedSprite.Play();
+            session.OwnerExiting = () => StopOwnedSession(session, broadcast: false);
+            owner.TreeExiting += session.OwnerExiting;
+            if (target != null && GetSpriteFrames() is { } spriteFrames)
+            {
+                AnimatedSprite2D animatedSprite = new()
+                {
+                    SpriteFrames = spriteFrames,
+                    Animation = AnimationName,
+                    Centered = false,
+                    Visible = ShouldShowOverlaySprites(),
+                    ZAsRelative = true,
+                    ZIndex = 0,
+                };
+                session.Sprite = animatedSprite;
+                animatedSprite.AnimationFinished += session.PlaybackEnded;
+                animatedSprite.TreeExiting += session.PlaybackEnded;
+                target.Parent.AddChild(animatedSprite);
+                target.Parent.MoveChild(animatedSprite, 0);
+                ApplyLayout(target.Height, animatedSprite);
+                target.Body.Visible = false;
+                animatedSprite.Play();
+            }
 
             StartAudio(session);
-            session.Timeout = creatureNode.GetTree().CreateTimer(PlaybackTimeoutSeconds, processAlways: false);
+            session.Timeout = owner.GetTree().CreateTimer(PlaybackTimeoutSeconds, processAlways: false);
             session.Timeout.Timeout += session.PlaybackEnded;
             EnsureScreenContextHook();
             SyncPlayerCreatureDrawOrder();
@@ -275,6 +267,11 @@ internal static class NndxVideoOverlay
         TryCleanup(() => CleanupAnimatedSprite(session), "remove sprite");
         TryCleanup(() => CleanupAudio(session), "remove audio");
         TryCleanup(() => CleanupTimeout(session), "remove timeout");
+        TryCleanup(() =>
+        {
+            if (GodotObject.IsInstanceValid(session.Owner) && session.OwnerExiting != null)
+                session.Owner.TreeExiting -= session.OwnerExiting;
+        }, "disconnect owner exit");
         TryCleanup(SyncPlayerCreatureDrawOrder, "restore draw order");
         TryCleanup(SyncOverlaySpriteVisibility, "update visibility");
         TryCleanup(ReleaseScreenContextHookIfIdle, "release screen hook");
@@ -323,38 +320,11 @@ internal static class NndxVideoOverlay
     {
         playerNetId = 0;
 
-        if (!CombatManager.Instance.IsInProgress)
-        {
-            return false;
-        }
-
-        Player? localPlayer = LocalContext.GetMe(CombatManager.Instance.DebugOnlyGetState());
-        if (localPlayer == null)
-        {
-            return false;
-        }
-
+        if (!CanToggleInCurrentScreen()) return false;
+        Player? localPlayer = LocalContext.GetMe(NndxRoomContext.State);
+        if (localPlayer == null) return false;
         playerNetId = localPlayer.NetId;
         return true;
-    }
-
-    private static NCreature? GetCreatureForPlayer(ulong playerNetId)
-    {
-        if (!CombatManager.Instance.IsInProgress || NCombatRoom.Instance == null)
-        {
-            return null;
-        }
-
-        CombatState? combatState = CombatManager.Instance.DebugOnlyGetState();
-        Player? player = combatState?.GetPlayer(playerNetId);
-        NCreature? creatureNode = player?.Creature.GetCreatureNode();
-        if (player?.Creature.IsDead == true || creatureNode == null || !GodotObject.IsInstanceValid(creatureNode)
-            || creatureNode.IsQueuedForDeletion() || !creatureNode.IsInsideTree())
-        {
-            return null;
-        }
-
-        return creatureNode;
     }
 
     private static SpriteFrames? BuildSpriteFrames()
@@ -457,30 +427,20 @@ internal static class NndxVideoOverlay
         TryCleanup(SyncOverlaySpriteVisibility, "update screen visibility");
     }
 
-    internal static bool ShouldShowOverlaySprites()
+    internal static bool CanToggleInCurrentScreen()
     {
-        if (!CombatManager.Instance.IsInProgress || NCombatRoom.Instance == null)
-        {
-            return false;
-        }
-
-        if (NMapScreen.Instance?.IsOpen == true)
-        {
-            return false;
-        }
-
-        if (NCapstoneContainer.Instance?.InUse == true)
-        {
-            return false;
-        }
-
-        if (NOverlayStack.Instance is { ScreenCount: > 0 })
-        {
-            return false;
-        }
-
-        return true;
+        if (!NndxRoomContext.CanPlay()) return false;
+        // UI presentation never controls network playback. Only local input requires
+        // the multiplayer portrait to be present; solo runs retain their existing behavior.
+        if (RunManager.Instance?.NetService.Type is not (NetGameType.Host or NetGameType.Client)) return true;
+        var player = LocalContext.GetMe(NndxRoomContext.State);
+        return player != null && NndxPortraitSwap.HasVisiblePortrait(player.NetId);
     }
+
+    // Opening the map changes visual presentation, not playback ownership or input eligibility.
+    internal static bool ShouldShowOverlaySprites()
+        => NndxRoomContext.CanPlay() && NMapScreen.Instance?.IsOpen != true
+            && NCapstoneContainer.Instance?.InUse != true;
 
     private static void SyncOverlaySpriteVisibility()
     {
@@ -502,13 +462,10 @@ internal static class NndxVideoOverlay
         }
     }
 
-    private static void ApplyLayout(NCreature creatureNode, AnimatedSprite2D sprite)
+    private static void ApplyLayout(float targetHeight, AnimatedSprite2D sprite)
     {
-        Control bounds = creatureNode.Visuals.Bounds;
-        // Both the bounds and sprite live under Visuals. Use the unscaled height;
-        // Visuals already applies the character's default and temporary body scales.
-        float targetHeight = bounds.Size.Y;
-        if (targetHeight <= 0f)
+        // Use the height in the replacement parent's coordinates. Parent scaling is inherited once.
+        if (!float.IsFinite(targetHeight) || targetHeight <= 0f)
         {
             targetHeight = FrameHeight;
         }
@@ -525,6 +482,9 @@ internal static class NndxVideoOverlay
     }
 
     private static void OnPlaybackEnded(PlayerOverlaySession session)
+        => StopOwnedSession(session, session.IsLocallyControlled);
+
+    private static void StopOwnedSession(PlayerOverlaySession session, bool broadcast)
     {
         // An old sprite/timer must never stop a newer playback for the same player.
         if (!_sessions.TryGetValue(session.PlayerNetId, out PlayerOverlaySession? current)
@@ -534,13 +494,13 @@ internal static class NndxVideoOverlay
         }
 
         // Every peer restores its own visuals even when a remote stop never arrives.
-        StopForPlayer(session.PlayerNetId, broadcast: session.IsLocallyControlled);
+        StopForPlayer(session.PlayerNetId, broadcast);
     }
 
     private static void RestoreBody(PlayerOverlaySession session)
     {
         // GetCurrentBody() can change after Visible=false (e.g. phobia-mode visuals).
-        if (GodotObject.IsInstanceValid(session.Body))
+        if (session.Body != null && GodotObject.IsInstanceValid(session.Body))
         {
             session.Body.Visible = session.BodyWasVisible;
         }
@@ -605,7 +565,7 @@ internal static class NndxVideoOverlay
             return;
         }
 
-        Node audioParent = NDebugAudioManager.Instance ?? NCombatRoom.Instance ?? (Node)session.Creature;
+        Node audioParent = session.Owner;
         AudioStreamPlayer audioPlayer = new()
         {
             Stream = audio,
@@ -613,6 +573,8 @@ internal static class NndxVideoOverlay
             VolumeLinear = 1f,
         };
         session.Audio = audioPlayer;
+        // Audio-only rooms have no sprite completion signal.
+        audioPlayer.Finished += session.PlaybackEnded;
         audioParent.AddChild(audioPlayer);
         audioPlayer.Play();
     }
@@ -627,6 +589,7 @@ internal static class NndxVideoOverlay
         if (GodotObject.IsInstanceValid(session.Audio))
         {
             AudioStreamPlayer audio = session.Audio;
+            if (session.PlaybackEnded != null) audio.Finished -= session.PlaybackEnded;
             TryCleanup(audio.Stop, "stop audio");
             if (!audio.IsQueuedForDeletion())
             {

@@ -46,6 +46,7 @@ namespace Godot
         public Node() => All.Add(this);
         public IEnumerable<Node> GetChildren() => Children;
         public T? GetNodeOrNull<T>(string path) where T : Node => Children.OfType<T>().FirstOrDefault();
+        public virtual string GetClass() => GetType().Name;
         public virtual void AddChild(Node child)
         {
             if (child is AudioStreamPlayer && FailNextAudioAdd)
@@ -95,6 +96,7 @@ namespace Godot
                 _visible = value;
             }
         }
+        public bool IsVisibleInTree() => Visible && (Parent is not Node2D parent || parent.IsVisibleInTree());
         public bool ZAsRelative { get; set; }
         public int ZIndex { get; set; }
         public Vector2 Position { get; set; }
@@ -198,6 +200,7 @@ namespace Godot
             if (FailNextStop) { FailNextStop = false; throw new InvalidOperationException("injected audio Stop failure"); }
             Playing = false;
         }
+        public Action CaptureFinished() => Finished ?? (() => { });
         public void Finish() { Playing = false; Finished?.Invoke(); }
     }
 
@@ -260,14 +263,19 @@ namespace MegaCrit.Sts2.Core.Combat
 {
     public class CombatState
     {
-        public MegaCrit.Sts2.Core.Runs.PortraitTestRunState RunState { get; } = new();
-        public List<MegaCrit.Sts2.Core.Entities.Players.Player> Players { get; } = new();
+        public MegaCrit.Sts2.Core.Runs.RunState RunState { get; } = new();
+        public List<MegaCrit.Sts2.Core.Entities.Players.Player> Players => RunState.Players;
         public MegaCrit.Sts2.Core.Entities.Players.Player? GetPlayer(ulong id) => Players.SingleOrDefault(player => player.NetId == id);
     }
     public class CombatManager
     {
         public static CombatManager Instance { get; } = new();
         public bool IsInProgress { get; set; } = true;
+        public bool IsEnding { get; set; }
+        public bool IsStarting { get; set; }
+        public void SetUpCombat() { }
+        public void EndCombatInternal() { }
+        public void LoseCombat() { }
         public CombatState State { get; set; } = new();
         public CombatState DebugOnlyGetState() => State;
     }
@@ -278,6 +286,8 @@ namespace MegaCrit.Sts2.Core.Context
     {
         public static MegaCrit.Sts2.Core.Entities.Players.Player? Local;
         public static MegaCrit.Sts2.Core.Entities.Players.Player? GetMe(MegaCrit.Sts2.Core.Combat.CombatState? state) => Local;
+        public static MegaCrit.Sts2.Core.Entities.Players.Player? GetMe(MegaCrit.Sts2.Core.Runs.RunState? state) => Local;
+        public static MegaCrit.Sts2.Core.Entities.Players.Player? GetMe(IEnumerable<MegaCrit.Sts2.Core.Entities.Players.Player> players) => Local;
     }
 }
 namespace MegaCrit.Sts2.Core.Nodes.Combat
@@ -305,6 +315,7 @@ namespace MegaCrit.Sts2.Core.Nodes.Rooms
     public class NCombatRoom : Godot.Node
     {
         public static NCombatRoom? Instance { get; set; } = new();
+        public MegaCrit.Sts2.Core.Rooms.CombatRoomMode Mode { get; set; }
         public List<MegaCrit.Sts2.Core.Nodes.Combat.NCreature> CreatureNodes { get; } = new();
     }
 }
@@ -329,6 +340,7 @@ namespace MegaCrit.Sts2.Core.Nodes.Screens.Map
     {
         public static NMapScreen? Instance { get; set; }
         public bool IsOpen { get; set; }
+        public void TravelToMapCoord() { }
     }
 }
 namespace MegaCrit.Sts2.Core.Nodes.Screens.Overlays
@@ -344,6 +356,11 @@ namespace MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext
     public class ActiveScreenContext
     {
         public static ActiveScreenContext Instance { get; } = new();
+        public object? ForegroundOverride { get; set; }
+        public bool IsCurrent(object screen) => ForegroundOverride != null
+            ? ReferenceEquals(ForegroundOverride, screen)
+            : ReferenceEquals(screen, MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance)
+                && MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance?.IsOpen == true;
         public event Action? Updated;
         public void Update() => Updated?.Invoke();
     }
@@ -359,18 +376,25 @@ namespace MegaCrit.Sts2.Core.Multiplayer.Game
 }
 namespace MegaCrit.Sts2.Core.Runs
 {
-    public class PortraitTestRunState
+    public class RunState
     {
-        public PortraitTestRoom CurrentRoom { get; } = new();
+        public MegaCrit.Sts2.Core.Rooms.AbstractRoom CurrentRoom { get; set; } = new MegaCrit.Sts2.Core.Rooms.CombatRoom();
+        public int CurrentActIndex { get; set; }
+        public MegaCrit.Sts2.Core.Map.MapCoord? CurrentMapCoord { get; set; } = new(3, 7);
+        public List<MegaCrit.Sts2.Core.Entities.Players.Player> Players { get; } = new();
+        public MegaCrit.Sts2.Core.Entities.Players.Player? GetPlayer(ulong id) => Players.SingleOrDefault(p => p.NetId == id);
         public PortraitTestRng Rng { get; } = new();
     }
-    public class PortraitTestRoom { public int? Id { get; set; } = 42; }
     public class PortraitTestRng { public uint Seed { get; set; } = 123; }
 
     public class RunManager
     {
         public static RunManager? Instance { get; set; } = new();
         public bool IsInProgress { get; set; } = true;
+        public bool IsCleaningUp { get; set; }
+        public bool IsAbandoned { get; set; }
+        public RunState? DebugOnlyGetState() => MegaCrit.Sts2.Core.Combat.CombatManager.Instance.State.RunState;
+        public void RemotePlayerDisconnected(ulong playerId) { }
         public MegaCrit.Sts2.Core.Multiplayer.Game.FakeNetService NetService { get; } = new();
     }
 }

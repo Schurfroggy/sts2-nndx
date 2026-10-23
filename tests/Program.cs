@@ -176,7 +176,8 @@ Run("Local input preferences persist keyboard and ignore legacy controller setti
     {
         NndxInputPreferences defaults = NndxInputPreferences.Load(path);
         Check(defaults.Keyboard == "C", "Default keyboard binding must remain C");
-        var chosen = defaults with { Keyboard = "Ctrl+J" };
+        Check(defaults.PetsLaugh, "Pets default to enabled");
+        var chosen = defaults with { Keyboard = "Ctrl+J", PetsLaugh = false };
         chosen.Save(path);
         Check(NndxInputPreferences.Load(path) == chosen, "Input settings must survive restart");
         var cleared = chosen with { Keyboard = "" };
@@ -185,6 +186,7 @@ Run("Local input preferences persist keyboard and ignore legacy controller setti
         Check(!File.Exists(path + ".tmp"), "Atomic save should not leave temp file");
         File.WriteAllText(path, "{\"Keyboard\":\"J\",\"ControllerButton\":16,\"SteamInputEnabled\":true}");
         var migrated = NndxInputPreferences.Load(path);
+        Check(migrated.PetsLaugh, "Old settings without pet field default to enabled");
         Check(migrated.Keyboard == "J", "Legacy controller preferences must not reset keyboard binding");
         migrated.Save(path);
         Check(!File.ReadAllText(path).Contains("ControllerButton") && !File.ReadAllText(path).Contains("SteamInputEnabled"),
@@ -265,7 +267,15 @@ Run("Production input controller validates, suspends, restores and dispatches lo
         keyboard.Write("J");
         Check(keyboard.Read() == "C" && STS2RitsuLib.RuntimeInput.RuntimeHotkeyService.Active[keyboardId].Binding == "C",
             "Save failure must retain both saved preference in memory and active binding");
+        var petSetting = (STS2RitsuLib.Settings.IModSettingsValueBinding<bool>)
+            STS2RitsuLib.Settings.ModSettingsSectionBuilder.Bindings["pets_laugh"];
+        petSetting.Write(false);
+        Check(petSetting.Read() && NndxInput.PetsLaughEnabled, "Failed pet preference save must keep the previous setting");
         Directory.Delete(path);
+        petSetting.Write(false);
+        Check(!NndxInputPreferences.Load(path).PetsLaugh && NndxInputPreferences.Load(path).Keyboard == "C",
+            "Pet toggle must persist without changing keyboard binding");
+        petSetting.Write(true);
         var keyboardHandle = STS2RitsuLib.RuntimeInput.RuntimeHotkeyService.Active[keyboardId];
         Time.Now += 1000;
         keyboardHandle.Invoke();
@@ -391,7 +401,7 @@ Run("All four portraits swap only the target player and restore on every exit pa
     }
     NndxVideoOverlay.StartForPlayer(1001, broadcast: false, faceIndex: 1);
     creature.Entity.IsDead = true;
-    NndxVideoOverlay.HandlePlayerDeath(creature.Entity);
+    NndxVideoOverlay.HandleCreatureDeath(creature.Entity);
     Check(ReferenceEquals(panel.Icon.Texture, original), "Death must restore original portrait");
 });
 Run("Portrait ownership survives panel rebuilds, old callbacks and other mod changes", () =>
@@ -803,6 +813,256 @@ Run("Rapid bodyless toggles stay bounded and audio startup errors release their 
     }
     Check(!LiveAudio().Any() && ReferenceEquals(panel.Icon.Texture, original), "Final toggle must restore portrait");
 });
+Run("Osty uses a square canvas at its own baseline and inherits HP scaling exactly once", () =>
+{
+    foreach (var size in new[] { new Vector2(232, 204), new Vector2(360, 150), new Vector2(150, 330) })
+    foreach (float scale in new[] { 0.2f, 0.5f, 1f, 1.35f, 2f, 3f })
+    {
+        var owner = Setup(278, 1);
+        var pet = AddOsty(1001);
+        pet.Visuals.Bounds.Size = size;
+        pet.Visuals.Scale = Vector2.One * scale;
+        NndxVideoOverlay.StartForPlayer(1001, false);
+        var sprite = Sprite(pet);
+        AssertPetGeometry(pet, sprite, Math.Min(size.X, size.Y));
+        Check(!pet.Visuals.Body.Visible && !owner.Visuals.Body.Visible, "Both native bodies must be hidden");
+        Check(ReferenceEquals(sprite.SpriteFrames, Sprite(owner).SpriteFrames), "Owner and pet must reuse the same cached frames");
+        Check(LiveAudio().Count() == 1, "Pet must not add another laugh audio player");
+    }
+});
+Run("Osty stops and restores with manual stop, natural end, timeout, room exit and owner death", () =>
+{
+    foreach (string end in new[] { "manual", "natural", "timeout", "room", "owner-death" })
+    {
+        var owner = Setup(278, 1); var pet = AddOsty(1001);
+        var panel = AddPortrait(1001); var original = panel.Icon.Texture;
+        NndxVideoOverlay.StartForPlayer(1001, false, true);
+        switch (end)
+        {
+            case "manual": NndxVideoOverlay.StopForPlayer(1001, false); break;
+            case "natural": Sprite(owner).Finish(); break;
+            case "timeout": Node.Tree.Timers.Last().Expire(); break;
+            case "room": NndxRoomContext.BeginTransition(); break;
+            case "owner-death": owner.Entity.IsDead = true; NndxVideoOverlay.HandleCreatureDeath(owner.Entity); break;
+        }
+        Node.FlushDeletion();
+        Check(owner.Visuals.Body.Visible && pet.Visuals.Body.Visible && !LiveSprites().Any(), $"{end} must restore both bodies");
+        Check(ReferenceEquals(panel.Icon.Texture, original), $"{end} must restore the owner's portrait");
+        Check(!LiveAudio().Any(a => ReferenceEquals(a.Stream, ResourceLoader.Resources["res://res/nndx.mp3"])), "Laugh audio must stop with its session");
+        foreach (var sound in LiveAudio().ToArray()) sound.Finish();
+    }
+});
+Run("Osty death plays one death sound without stopping its owner; revival joins the existing frame", () =>
+{
+    var owner = Setup(278, 1); var pet = AddOsty(1001);
+    var panel = AddPortrait(1001);
+    NndxVideoOverlay.StartForPlayer(1001, false, true, 2);
+    var main = Sprite(owner); main.Frame = 137; main.FrameProgress = 0.375f;
+    var oldPet = Sprite(pet); var stale = oldPet.CaptureFinished();
+    NndxVideoOverlay.HandleCreatureDeath(pet.Entity);
+    Check(!pet.Visuals.Body.Visible && DeathAudio().Count() == 0, "A prevented death must not stop a live pet or play its death sound");
+    pet.Entity.IsDead = true;
+    NndxVideoOverlay.HandleCreatureDeath(pet.Entity);
+    NndxVideoOverlay.HandleCreatureDeath(pet.Entity);
+    Check(pet.Visuals.Body.Visible && oldPet.IsQueuedForDeletion() && DeathAudio().Count() == 1,
+        "Dying Osty must restore its own body and play exactly one death sound");
+    Check(main.IsPlaying() && !main.IsQueuedForDeletion() && !owner.Visuals.Body.Visible
+        && ReferenceEquals(panel.Icon.Texture, Face(2)), "Pet death must not stop owner, laughter or portrait");
+    pet.Entity.IsDead = false;
+    NndxVideoOverlay.RefreshPets(1001);
+    var revived = Sprite(pet);
+    Check(revived.Frame == 137 && revived.FrameProgress == 0.375f, "Revival must continue the owner's animation phase");
+    stale();
+    Check(!revived.IsQueuedForDeletion() && !pet.Visuals.Body.Visible, "Old pet completion must not affect revival");
+    foreach (var audio in DeathAudio().ToArray()) audio.Finish();
+    Check(DeathAudio().Count() == 0, "Death sound must free itself after completion");
+});
+Run("Growth and repeated summons preserve the Osty sprite and never add transport or audio", () =>
+{
+    Setup(278, 1); var pet = AddOsty(1001);
+    RitsuLibSidecarTypedMessageRegistry.Sent.Clear();
+    NndxVideoOverlay.StartForPlayer(1001, true);
+    var sprite = Sprite(pet);
+    foreach (float scale in new[] { 1f, 1.5f, 2f, 0.7f })
+    {
+        pet.Visuals.Scale = Vector2.One * scale;
+        pet.Position += new Vector2(25, -10);
+        NndxVideoOverlay.RefreshPets(1001);
+        Check(ReferenceEquals(sprite, Sprite(pet)), "A living pet's summon/HP increase must not recreate the overlay");
+        AssertPetGeometry(pet, sprite, 204);
+    }
+    Check(RitsuLibSidecarTypedMessageRegistry.Sent.Count == 1 && LiveAudio().Count() == 1,
+        "Pet growth must not send extra packets or play duplicate laugh audio");
+});
+Run("Late summons join either the owner sprite or an audio-only session without spawning missing pets", () =>
+{
+    var owner = Setup(278, 1);
+    NndxVideoOverlay.StartForPlayer(1001, false);
+    Check(LiveSprites().Count() == 1, "No Osty must be invented before the game summons it");
+    Sprite(owner).Frame = 88; Sprite(owner).FrameProgress = 0.25f;
+    var pet = AddOsty(1001);
+    NndxVideoOverlay.RefreshPets(1001);
+    Check(Sprite(pet).Frame == 88 && Sprite(pet).FrameProgress == 0.25f, "New pet must join the sprite's current phase");
+    Setup(278, 1).Visuals.Visible = false;
+    NndxVideoOverlay.StartForPlayer(1001, false);
+    LiveAudio().Single().PlaybackPosition = 3.125;
+    pet = AddOsty(1001);
+    NndxVideoOverlay.RefreshPets(1001);
+    Check(Sprite(pet).Frame == 75 && LiveSprites().Count() == 1 && LiveAudio().Count() == 1,
+        "Audio-only owner must still drive a subsequently-visible pet with the same playback phase");
+});
+Run("Host and client messages animate only the sender's Osty and honor local map/deck visibility", () =>
+{
+    Setup(278, 1); var localPet = AddOsty(1001);
+    var remote = AddRemote(2002); var remotePet = AddOsty(2002);
+    RunManager.Instance!.NetService.Type = NetGameType.Host;
+    RitsuLibSidecarTypedMessageRegistry.Sent.Clear();
+    DeliverRoom(Message(2002, true, 100, 3));
+    var sprite = Sprite(remotePet);
+    Check(localPet.Visuals.Body.Visible && !remotePet.Visuals.Body.Visible && !remote.Visuals.Body.Visible,
+        "Remote start must replace the pet identified by its owner, never a local pet");
+    DeliverRoom(Message(2002, true, 100, 1));
+    Check(ReferenceEquals(sprite, Sprite(remotePet)) && RitsuLibSidecarTypedMessageRegistry.Sent.Count == 1,
+        "Duplicate starts must not recreate or re-broadcast pet playback");
+    MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance = new() { IsOpen = true };
+    MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext.ActiveScreenContext.Instance.Update();
+    Check(!sprite.Visible && !Sprite(remote).Visible && LiveAudio().Count() == 1, "Map must hide both sprites but preserve one laugh");
+    MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance = null;
+    MegaCrit.Sts2.Core.Nodes.Screens.Capstones.NCapstoneContainer.Instance = new() { InUse = true };
+    MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext.ActiveScreenContext.Instance.Update();
+    Check(!sprite.Visible, "Deck must hide pet animation too");
+    MegaCrit.Sts2.Core.Nodes.Screens.Capstones.NCapstoneContainer.Instance = null;
+    MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext.ActiveScreenContext.Instance.Update();
+    Check(sprite.Visible && Sprite(remote).Visible, "Closing deck must restore both sprites");
+    DeliverRoom(Message(2002, false, 101));
+    Check(remotePet.Visuals.Body.Visible && remote.Visuals.Body.Visible && !LiveAudio().Any(), "Remote stop must restore the same owner's full group");
+    RunManager.Instance.NetService.Type = NetGameType.Client;
+    DeliverRoom(Message(2002, true, 102, 1));
+    Check(!remotePet.Visuals.Body.Visible && localPet.Visuals.Body.Visible, "Host relay on a client must target the same pet owner");
+});
+Run("Osty removal and partial attachment/cleanup failures leave the owner playable", () =>
+{
+    var owner = Setup(278, 1);
+    NndxVideoOverlay.StartForPlayer(1001, false);
+    var pet = AddOsty(1001);
+    AnimatedSprite2D.FailNextPlay = true;
+    NndxVideoOverlay.RefreshPets(1001);
+    Check(pet.Visuals.Body.Visible && Sprite(owner).IsPlaying(), "Failed pet start must roll back only the pet");
+    Node.FlushDeletion();
+    NndxVideoOverlay.RefreshPets(1001);
+    Check(!pet.Visuals.Body.Visible, "A failed pet attachment must be retryable");
+    pet.Free();
+    NCombatRoom.Instance!.CreatureNodes.Remove(pet);
+    Check(Sprite(owner).IsPlaying() && DeathAudio().Count() == 0, "Tree removal must not stop the owner or masquerade as a pet death");
+    pet = AddOsty(1001);
+    NndxVideoOverlay.RefreshPets(1001);
+    AnimatedSprite2D.FailNextStop = true;
+    NndxVideoOverlay.StopForPlayer(1001, false);
+    Node.FlushDeletion();
+    Check(pet.Visuals.Body.Visible && owner.Visuals.Body.Visible && !LiveSprites().Any(), "Pet/native cleanup failure must not leave bodies hidden or sprites leaked");
+});
+Run("Rapid pet toggles and stale callbacks remain bounded", () =>
+{
+    Setup(278, 1); var pet = AddOsty(1001); AddPortrait(1001);
+    Action? stale = null;
+    for (int i = 0; i < 100; i++)
+    {
+        Time.Now += 150;
+        NndxVideoOverlay.Toggle();
+        if (i % 2 == 0)
+        {
+            stale?.Invoke();
+            Check(!pet.Visuals.Body.Visible && LiveSprites().Count() == 2 && LiveAudio().Count() == 1,
+                "Each start must own exactly two sprites and one sound");
+            stale = Sprite(pet).CaptureFinished();
+        }
+        else Check(pet.Visuals.Body.Visible && !LiveSprites().Any() && !LiveAudio().Any(), "Each stop must release the group");
+        Node.FlushDeletion();
+    }
+});
+Run("Generic pets preserve aspect ratio, ownership and independent death alongside Osty", () =>
+{
+    foreach (float scale in new[] { 0.2f, 1f, 2f, 3f })
+    {
+        var owner = Setup(278, 1); var osty = AddOsty(1001);
+        var first = AddOsty(1001); first.Entity.Monster = new object();
+        var second = AddOsty(1001); second.Entity.Monster = new object();
+        first.Visuals.Scale = Vector2.One * scale;
+        first.Visuals.Bounds.Size = new(180, 300);
+        second.Visuals.Bounds.Size = new(400, 150);
+        var otherOwner = AddRemote(2002); var otherPet = AddOsty(2002); otherPet.Entity.Monster = new object();
+        NndxVideoOverlay.StartForPlayer(1001, true);
+        Check(LiveSprites().Count() == 4 && LiveAudio().Count() == 1 && otherPet.Visuals.Body.Visible,
+            "All and only the owner's pets must share one laugh");
+        AssertPetGeometry(osty, Sprite(osty), 204);
+        AssertPetGeometry(first, Sprite(first), 180f * 330 / 270, 180);
+        AssertPetGeometry(second, Sprite(second), 150, 150f * 270 / 330);
+        first.Entity.IsDead = true;
+        NndxVideoOverlay.HandleCreatureDeath(first.Entity);
+        NndxVideoOverlay.HandleCreatureDeath(first.Entity);
+        Check(DeathAudio().Count() == 1 && first.Visuals.Body.Visible && !second.Visuals.Body.Visible
+            && !osty.Visuals.Body.Visible && !owner.Visuals.Body.Visible, "One death must not stop siblings or owner");
+        NndxVideoOverlay.StopForPlayer(1001, false);
+        Check(second.Visuals.Body.Visible && osty.Visuals.Body.Visible && !LiveSprites().Any(), "Stop restores every pet");
+    }
+});
+Run("Generic late arrivals and revivals join playback; unknown layouts do not block siblings", () =>
+{
+    var owner = Setup(278, 1);
+    NndxVideoOverlay.StartForPlayer(1001, false);
+    Sprite(owner).Frame = 90;
+    var bad = AddOsty(1001); bad.Entity.Monster = new object(); bad.Visuals.Bounds.Size = Vector2.Zero;
+    var hidden = AddOsty(1001); hidden.Entity.Monster = new object(); hidden.Visuals.Body.Visible = false;
+    var pet = AddOsty(1001); pet.Entity.Monster = new object();
+    NndxVideoOverlay.RefreshPet(pet.Entity);
+    Check(Sprite(pet).Frame == 90 && bad.Visuals.Body.Visible && !hidden.Visuals.Body.Visible
+        && LiveSprites().Count() == 2, "Unsupported or hidden bodies must be left alone");
+    pet.Entity.IsDead = true;
+    NndxVideoOverlay.HandleCreatureDeath(pet.Entity);
+    pet.Entity.IsDead = false;
+    Sprite(owner).Frame = 150;
+    NndxVideoOverlay.RefreshPet(pet.Entity);
+    Check(Sprite(pet).Frame == 150, "Generic revival must join owner progress");
+    var extra = AddOsty(1001); extra.Entity.Monster = new object();
+    AnimatedSprite2D.FailNextPlay = true;
+    NndxVideoOverlay.RefreshPet(extra.Entity);
+    Check(extra.Visuals.Body.Visible && Sprite(pet).IsPlaying(), "One failing pet must not break existing pets");
+});
+Run("Pet death before its lifecycle callback produces one sound; ordinary removal is silent", () =>
+{
+    var owner = Setup(278, 1); var pet = AddOsty(1001); pet.Entity.Monster = new object();
+    NndxVideoOverlay.StartForPlayer(1001, false);
+    pet.Entity.IsDead = true;
+    pet.Free();
+    NCombatRoom.Instance!.CreatureNodes.Remove(pet);
+    NndxVideoOverlay.HandleCreatureDeath(pet.Entity);
+    Check(DeathAudio().Count() == 1 && Sprite(owner).IsPlaying(), "Early removal must preserve one death sound");
+});
+Run("Pet setting persists, restores all active pets immediately and leaves owner playback intact", () =>
+{
+    var binding = (STS2RitsuLib.Settings.IModSettingsValueBinding<bool>)
+        STS2RitsuLib.Settings.ModSettingsSectionBuilder.Bindings["pets_laugh"];
+    var owner = Setup(278, 1); var osty = AddOsty(1001); var pet = AddOsty(1001); pet.Entity.Monster = new object();
+    pet.ZIndex = 6; pet.ZAsRelative = false;
+    var remote = AddRemote(2002); var remotePet = AddOsty(2002);
+    NndxVideoOverlay.StartForPlayer(1001, false);
+    NndxVideoOverlay.StartForPlayer(2002, false);
+    var old = Sprite(pet).CaptureFinished();
+    binding.Write(false);
+    Check(pet.ZIndex == 6 && !pet.ZAsRelative, "Disabling must restore a custom pet's original draw order");
+    Check(!binding.Read() && !NndxInput.PetsLaughEnabled && osty.Visuals.Body.Visible && pet.Visuals.Body.Visible
+        && remotePet.Visuals.Body.Visible && LiveSprites().Count() == 2 && LiveAudio().Count() == 2,
+        "Disabling must immediately restore all local pet visuals while retaining both owners");
+    var extra = AddOsty(1001); extra.Entity.Monster = new object();
+    NndxVideoOverlay.RefreshPet(extra.Entity);
+    extra.Entity.IsDead = true; NndxVideoOverlay.HandleCreatureDeath(extra.Entity);
+    Check(extra.Visuals.Body.Visible && DeathAudio().Count() == 0, "Disabled pets must not animate or play death sounds");
+    Sprite(owner).Frame = 123;
+    binding.Write(true); old();
+    Check(!osty.Visuals.Body.Visible && !pet.Visuals.Body.Visible && !remotePet.Visuals.Body.Visible
+        && Sprite(pet).Frame == 123, "Re-enabling joins active owners; stale callbacks cannot restore new bodies");
+    NndxVideoOverlay.ForceStop();
+});
 NndxVideoOverlay.ForceStop();
 Node.FlushDeletion();
 Console.WriteLine($"PASS: {passed} regression groups");
@@ -950,3 +1210,35 @@ static void DeliverRoom(NndxOverlaySyncMessage message)
 }
 static void InvokePrefix(Type type, params object[] args) => type.GetMethod("Prefix",
     System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.Invoke(null, args);
+
+static NCreature AddOsty(ulong ownerId)
+{
+    var owner = CombatManager.Instance.State.GetPlayer(ownerId)!;
+    var pet = new NCreature { Position = owner.Creature.Node.Position + new Vector2(150, -75) };
+    pet.AddChild(pet.Visuals); pet.Visuals.AddChild(pet.Visuals.Body); pet.Visuals.AddChild(pet.Visuals.Bounds);
+    pet.Visuals.Bounds.Size = new(232, 204); pet.Visuals.Bounds.Position = new(-116, -204);
+    pet.Entity = new Creature { IsPlayer = false, Monster = new MegaCrit.Sts2.Core.Models.Monsters.Osty(), PetOwner = owner, Node = pet };
+    NCombatRoom.Instance!.CreatureNodes.Add(pet); NCombatRoom.Instance.AddChild(pet);
+    return pet;
+}
+static IEnumerable<AudioStreamPlayer> DeathAudio() => LiveAudio().Where(a => ReferenceEquals(a.Stream, ResourceLoader.Resources["res://res/dead.mp3"]));
+void AssertPetGeometry(NCreature pet, AnimatedSprite2D sprite, float side, float? width = null)
+{
+    var foot = sprite.ToGlobal(sprite.Offset + new Vector2(135, 315));
+    Near(foot.X, pet.Visuals.GlobalPosition.X, "Osty foot X"); Near(foot.Y, pet.Visuals.GlobalPosition.Y, "Osty foot Y");
+    var top = sprite.ToGlobal(sprite.Offset);
+    var right = sprite.ToGlobal(sprite.Offset + new Vector2(270, 0));
+    var bottom = sprite.ToGlobal(sprite.Offset + new Vector2(0, 330));
+    Near(right.X - top.X, (width ?? side) * pet.Visuals.GlobalScale.X, "Pet displayed width");
+    Near(bottom.Y - top.Y, side * pet.Visuals.GlobalScale.Y, "Osty displayed height");
+    nativeCases.Add(new
+    {
+        parent_scale = new[] { pet.Scale.X, pet.Scale.Y },
+        body_scale = new[] { pet.Visuals.Scale.X, pet.Visuals.Scale.Y },
+        sprite_scale = new[] { sprite.Scale.X, sprite.Scale.Y },
+        sprite_position = new[] { sprite.Position.X, sprite.Position.Y },
+        sprite_offset = new[] { sprite.Offset.X, sprite.Offset.Y },
+        expected_height = side * pet.Visuals.GlobalScale.Y,
+        expected_width = (width ?? side) * pet.Visuals.GlobalScale.X,
+    });
+}

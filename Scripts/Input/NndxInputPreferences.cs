@@ -5,6 +5,7 @@ namespace Nndx.Scripts;
 internal sealed record NndxInputPreferences
 {
     public string Keyboard { get; init; } = "C";
+    public bool PetsLaugh { get; init; } = true;
 
     internal static NndxInputPreferences Load(string path) => File.Exists(path)
         ? JsonSerializer.Deserialize<NndxInputPreferences>(File.ReadAllText(path))

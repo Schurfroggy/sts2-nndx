@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../Scripts/NndxPetOverlay.cs" Link="Production/NndxPetOverlay.cs" />
     <Compile Include="../Scripts/NndxRoomContext.cs" Link="Production/NndxRoomContext.cs" />
     <Compile Include="../Scripts/NndxRoomLifecycle.cs" Link="Production/NndxRoomLifecycle.cs" />
     <Compile Include="../Scripts/NndxPortraitSwap.cs" Link="Production/NndxPortraitSwap.cs" />

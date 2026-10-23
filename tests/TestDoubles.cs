@@ -162,6 +162,9 @@ namespace Godot
         public static bool FailNextStop;
         public SpriteFrames? SpriteFrames { get; set; }
         public StringName Animation { get; set; }
+        public int Frame { get; set; }
+        public float FrameProgress { get; set; }
+        public void SetFrameAndProgress(int frame, float progress) { Frame = frame; FrameProgress = progress; }
         public bool Centered { get; set; }
         public Vector2 Offset { get; set; }
         public bool Playing;
@@ -185,6 +188,8 @@ namespace Godot
     {
         public static bool FailNextPlay;
         public static bool FailNextStop;
+        public double PlaybackPosition { get; set; }
+        public double GetPlaybackPosition() => PlaybackPosition;
         public AudioStream? Stream { get; set; }
         public StringName Bus { get; set; }
         public float VolumeLinear { get; set; }
@@ -254,6 +259,8 @@ namespace MegaCrit.Sts2.Core.Entities.Creatures
     {
         public bool IsPlayer { get; set; } = true;
         public bool IsDead { get; set; }
+        public object? Monster { get; set; }
+        public MegaCrit.Sts2.Core.Entities.Players.Player? PetOwner { get; set; }
         public MegaCrit.Sts2.Core.Entities.Players.Player? Player { get; set; }
         public MegaCrit.Sts2.Core.Nodes.Combat.NCreature Node { get; set; } = null!;
         public MegaCrit.Sts2.Core.Nodes.Combat.NCreature GetCreatureNode() => Node;
@@ -466,3 +473,5 @@ namespace Nndx.Scripts
         public void Info(string message) { }
     }
 }
+
+namespace MegaCrit.Sts2.Core.Models.Monsters { public class Osty { } }

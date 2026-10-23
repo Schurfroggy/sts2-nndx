@@ -34,7 +34,10 @@ func verify():
 		var foot = sprite.to_global(sprite.offset + Vector2(135, 315))
 		var canvas_bottom = sprite.to_global(sprite.offset + Vector2(135, 330))
 		var top = sprite.to_global(sprite.offset + Vector2(135, 0))
-		if foot.distance_to(creature.global_position) > 0.01 or abs(canvas_bottom.y - top.y - data.expected_height) > 0.01:
+		var left_edge = sprite.to_global(sprite.offset)
+		var right_edge = sprite.to_global(sprite.offset + Vector2(270, 0))
+		var width_failed = data.has("expected_width") and abs(right_edge.x - left_edge.x - data.expected_width) > 0.01
+		if width_failed or foot.distance_to(creature.global_position) > 0.01 or abs(canvas_bottom.y - top.y - data.expected_height) > 0.01:
 			failures += 1
 			push_error("Layout invariant failed: " + str(data))
 		creature.free()

@@ -31,6 +31,9 @@ public static class Entry
 #endif
         });
         RitsuLibFramework.SubscribeLifecycle<CreatureDiedEvent>(OnCreatureDied);
+        RitsuLibFramework.SubscribeLifecycle<SummonedEvent>(e => NndxVideoOverlay.RefreshPets(e.Summoner.NetId));
+        RitsuLibFramework.SubscribeLifecycle<CreatureAddedToCombatEvent>(e => NndxVideoOverlay.RefreshPet(e.Creature));
+        RitsuLibFramework.SubscribeLifecycle<CurrentHpChangedEvent>(e => NndxVideoOverlay.RefreshPet(e.Creature));
     }
 
     private static void OnCreatureDied(CreatureDiedEvent e)
@@ -40,6 +43,6 @@ public static class Entry
             return;
         }
 
-        NndxVideoOverlay.HandlePlayerDeath(e.Creature);
+        NndxVideoOverlay.HandleCreatureDeath(e.Creature);
     }
 }

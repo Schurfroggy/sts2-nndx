@@ -1,5 +1,4 @@
 using Godot;
-using MegaCrit.Sts2.Core.Audio.Debug;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
@@ -64,6 +63,8 @@ internal static class NndxVideoOverlay
         public AnimatedSprite2D? Sprite { get; set; }
 
         public AudioStreamPlayer? Audio { get; set; }
+
+        public Dictionary<Creature, NndxPetOverlay> Pets { get; } = new();
 
         public bool BodyWasVisible { get; set; } = true;
 
@@ -206,6 +207,7 @@ internal static class NndxVideoOverlay
             }
 
             StartAudio(session);
+            RefreshPets(playerNetId);
             session.Timeout = owner.GetTree().CreateTimer(PlaybackTimeoutSeconds, processAlways: false);
             session.Timeout.Timeout += session.PlaybackEnded;
             EnsureScreenContextHook();
@@ -237,8 +239,79 @@ internal static class NndxVideoOverlay
         }, "refresh portrait");
     }
 
-    public static void HandlePlayerDeath(Creature creature)
+    internal static void RefreshPets(ulong playerNetId)
     {
+        if (!_sessions.TryGetValue(playerNetId, out var session)) return;
+        if (!NndxInput.PetsLaughEnabled) { ClearPets(session); return; }
+        TryCleanup(() =>
+        {
+            foreach (var pair in session.Pets.Where(p => !p.Value.IsActive).ToArray())
+            {
+                session.Pets.Remove(pair.Key);
+                pair.Value.Dispose();
+            }
+            var nodes = NCombatRoom.Instance?.CreatureNodes
+                .Where(c => c.Entity.PetOwner?.NetId == playerNetId && !c.Entity.IsDead).ToArray();
+            if (nodes == null || nodes.Length == 0 || GetSpriteFrames() is not { } frames) return;
+            int frame;
+            float progress;
+            if (session.Sprite is { } main && GodotObject.IsInstanceValid(main))
+            {
+                frame = main.Frame;
+                progress = main.FrameProgress;
+            }
+            else
+            {
+                double position = (session.Audio?.GetPlaybackPosition() ?? 0) * FrameRate;
+                frame = Math.Clamp((int)position, 0, FrameCount - 1);
+                progress = (float)(position - Math.Floor(position));
+            }
+            foreach (var node in nodes)
+            {
+                if (session.Pets.ContainsKey(node.Entity)) continue;
+                TryCleanup(() =>
+                {
+                    if (NndxPetOverlay.Create(node, frames, frame, progress) is { } pet)
+                        session.Pets.Add(node.Entity, pet);
+                }, "attach pet visual");
+            }
+            SyncPlayerCreatureDrawOrder();
+        }, "refresh pet visuals");
+    }
+
+    internal static void RefreshPetPreference()
+    {
+        foreach (ulong playerId in _sessions.Keys.ToArray()) RefreshPets(playerId);
+        TryCleanup(SyncPlayerCreatureDrawOrder, "update pet draw order");
+    }
+
+    internal static void RefreshPet(Creature creature)
+    {
+        if (!NndxInput.PetsLaughEnabled || creature.IsDead || creature.PetOwner is not { } owner
+            || !_sessions.TryGetValue(owner.NetId, out var session)) return;
+        if (session.Pets.TryGetValue(creature, out var pet) && pet.IsActive) return;
+        RefreshPets(owner.NetId);
+    }
+
+    private static void ClearPets(PlayerOverlaySession session)
+    {
+        var pets = session.Pets.Values.ToArray();
+        session.Pets.Clear();
+        foreach (var pet in pets) TryCleanup(pet.Dispose, "restore pet");
+    }
+
+    public static void HandleCreatureDeath(Creature creature)
+    {
+        if (creature.PetOwner is { } owner && creature.IsDead)
+        {
+            if (_sessions.TryGetValue(owner.NetId, out var session)
+                && session.Pets.Remove(creature, out var pet) && pet.IsActive)
+            {
+                TryCleanup(pet.Dispose, "restore dead pet");
+                TryCleanup(() => PlayDeadSound(creature), "play pet death sound");
+            }
+            return;
+        }
         if (!creature.IsPlayer || creature.Player == null || !creature.IsDead)
         {
             return;
@@ -251,7 +324,7 @@ internal static class NndxVideoOverlay
         }
 
         StopForPlayer(playerNetId, broadcast: false);
-        PlayDeadSound(creature);
+        TryCleanup(() => PlayDeadSound(creature), "play player death sound");
     }
 
     public static void StopForPlayer(ulong playerNetId, bool broadcast)
@@ -263,6 +336,7 @@ internal static class NndxVideoOverlay
         }
 
         TryCleanup(() => session.Portrait?.Restore(), "restore portrait");
+        ClearPets(session);
         TryCleanup(() => RestoreBody(session), "restore body");
         TryCleanup(() => CleanupAnimatedSprite(session), "remove sprite");
         TryCleanup(() => CleanupAudio(session), "remove audio");
@@ -361,7 +435,7 @@ internal static class NndxVideoOverlay
     }
 
     /// <summary>
-    /// While any overlay is active, assign each player a small relative ZIndex (1..9) by row depth so
+    /// While any overlay is active, assign players and pets a small relative ZIndex (1..9) by row depth so
     /// front-row characters draw above back-row ones and enemies, without exceeding GlobalUi (z=0).
     /// CombatSceneContainer is z=-10; player z=1 yields effective -9, above enemies at -10.
     /// </summary>
@@ -373,8 +447,10 @@ internal static class NndxVideoOverlay
             return;
         }
 
+        var activePets = _sessions.Values.SelectMany(s => s.Pets.Values)
+            .Where(p => p.IsActive).Select(p => p.Creature).ToHashSet();
         List<NCreature> players = room.CreatureNodes
-            .Where(creature => creature.Entity.IsPlayer)
+            .Where(creature => creature.Entity.IsPlayer || activePets.Contains(creature.Entity))
             .ToList();
 
         if (_sessions.Count == 0)
@@ -453,6 +529,8 @@ internal static class NndxVideoOverlay
 
         foreach (PlayerOverlaySession session in _sessions.Values)
         {
+            foreach (var pet in session.Pets.Values)
+                if (pet.IsActive) pet.Sprite.Visible = visible;
             if (session.Sprite == null || !GodotObject.IsInstanceValid(session.Sprite))
             {
                 continue;
@@ -614,7 +692,7 @@ internal static class NndxVideoOverlay
         }
 
         NCreature? creatureNode = creature.GetCreatureNode();
-        Node? audioParent = NDebugAudioManager.Instance ?? NCombatRoom.Instance ?? (Node?)creatureNode;
+        Node? audioParent = (Node?)NCombatRoom.Instance ?? NRun.Instance ?? (Node?)creatureNode;
         if (audioParent == null)
         {
             return;
@@ -626,8 +704,16 @@ internal static class NndxVideoOverlay
             Bus = SfxBus,
             VolumeLinear = 1f,
         };
-        audioParent.AddChild(audioPlayer);
-        audioPlayer.Play();
         audioPlayer.Finished += audioPlayer.QueueFree;
+        try
+        {
+            audioParent.AddChild(audioPlayer);
+            audioPlayer.Play();
+        }
+        catch
+        {
+            audioPlayer.QueueFree();
+            throw;
+        }
     }
 }

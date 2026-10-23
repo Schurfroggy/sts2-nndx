@@ -3,7 +3,7 @@
 	"name": "sts_nndx",
 	"author": "froggy",
 	"description": "",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"min_game_version": "0.107.1", 
 	"has_pck": true,         
 	"has_dll": true,        

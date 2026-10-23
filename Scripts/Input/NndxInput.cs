@@ -14,6 +14,7 @@ public partial class NndxInput : Node
 {
     private const string KeyboardId = "sts_nndx.toggle_video";
     private static NndxInput? _instance;
+    internal static bool PetsLaughEnabled => _instance?._preferences.PetsLaugh ?? true;
     private NndxInputPreferences _preferences = new();
     private string _path = "";
     private string? _loadWarning;
@@ -180,11 +181,13 @@ public partial class NndxInput : Node
         try { next.Save(_path); }
         catch (Exception ex)
         {
-            Warn("保存输入配置失败，原绑定保持不变。");
+            Warn("保存设置失败，原设置保持不变。");
             Entry.Logger.Error($"NNDX input settings save failed: {ex}");
             return false;
         }
+        bool petsChanged = _preferences.PetsLaugh != next.PetsLaugh;
         _preferences = next;
+        if (petsChanged) NndxVideoOverlay.RefreshPetPreference();
         _keyboard?.Dispose();
         _keyboard = null;
         RefreshBindings();
@@ -220,7 +223,13 @@ public partial class NndxInput : Node
                     Read = () => _preferences.Keyboard,
                     Write = SetKeyboard,
                 })
-                .AddButton("reset_keyboard", T("恢复键盘默认值"), T("恢复 C"), () => SetKeyboard("C"))));
+                .AddButton("reset_keyboard", T("恢复键盘默认值"), T("恢复 C"), () => SetKeyboard("C")))
+            .AddSection("pets", section => section.WithTitle(T("召唤物"))
+                .AddToggle("pets_laugh", T("召唤物随主人一起大笑"),
+                    new ModSettingsCallbackValueBinding<bool>(Entry.ModId, "pets_laugh",
+                        STS2RitsuLib.Utils.Persistence.SaveScope.Global,
+                        () => _preferences.PetsLaugh,
+                        value => Commit(_preferences with { PetsLaugh = value }), () => { }))));
     }
 
     public override void _ExitTree()
